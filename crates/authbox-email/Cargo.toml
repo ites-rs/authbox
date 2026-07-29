@@ -1,6 +1,6 @@
 [package]
 name = "authbox-email"
-version = "1.2.4"
+version = "1.2.5"
 edition = "2024"
 description = "Email provider implementations for AuthBox"
 license = "Apache-2.0"
@@ -16,7 +16,7 @@ sendgrid = []
 smtp = ["dep:lettre"]
 
 [dependencies]
-authbox-core = "1.1.2"
+authbox-core = "1.1.3"
 async-trait = "0.1.89"
 reqwest = { version = "0.12", features = ["json"] }
 serde_json = "1.0"
