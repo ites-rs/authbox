@@ -13,7 +13,6 @@ async fn get_token(auth: &TestAuthService, user_id: &str) -> String {
         .await
         .expect("Failed to get Redis connection");
 
-    // Scan keys with a pattern if you use a prefix, or "*" if not
     let keys: Vec<String> = redis::cmd("KEYS")
         .arg("*")
         .query_async(&mut conn)
@@ -67,11 +66,12 @@ async fn test_register_and_login_flow() {
     let unverified = auth.login("john@test.com", "password123").await;
     assert!(matches!(unverified, Err(LoginError::EmailNotVerified)));
 
-    // Redis-aware token fetch
-    let token = get_token(&auth, "john@test.com").await;
+    // Fetch verification token using the USER ID
+    let token = get_token(&auth, &user.id()).await;
     auth.verify_email(&token).await.unwrap();
 
     let tokens = auth.login("john@test.com", "password123").await.unwrap();
+
     assert!(!tokens.access_token.is_empty());
     assert!(!tokens.refresh_token.is_empty());
 
@@ -83,19 +83,20 @@ async fn test_register_and_login_flow() {
 async fn test_refresh_token_flow() {
     let mut auth = build_test_auth();
 
-    auth.register(RegisterDto {
-        email: "refresh@test.com".to_string(),
-        password: "password123".to_string(),
-        username: None,
-        phone: None,
-        country: None,
-        city: None,
-        age: None,
-    })
-    .await
-    .unwrap();
+    let user = auth
+        .register(RegisterDto {
+            email: "refresh@test.com".to_string(),
+            password: "password123".to_string(),
+            username: None,
+            phone: None,
+            country: None,
+            city: None,
+            age: None,
+        })
+        .await
+        .unwrap();
 
-    let token = get_token(&auth, "refresh@test.com").await;
+    let token = get_token(&auth, &user.id()).await;
     auth.verify_email(&token).await.unwrap();
 
     let login = auth.login("refresh@test.com", "password123").await.unwrap();
@@ -108,25 +109,27 @@ async fn test_refresh_token_flow() {
 async fn test_refresh_token_blacklist_flow() {
     let mut auth = build_test_auth();
 
-    auth.register(RegisterDto {
-        email: "blacklist@test.com".to_string(),
-        password: "password123".to_string(),
-        username: None,
-        phone: None,
-        country: None,
-        city: None,
-        age: None,
-    })
-    .await
-    .unwrap();
+    let user = auth
+        .register(RegisterDto {
+            email: "blacklist@test.com".to_string(),
+            password: "password123".to_string(),
+            username: None,
+            phone: None,
+            country: None,
+            city: None,
+            age: None,
+        })
+        .await
+        .unwrap();
 
-    let token = get_token(&auth, "blacklist@test.com").await;
+    let token = get_token(&auth, &user.id()).await;
     auth.verify_email(&token).await.unwrap();
 
     let login = auth
         .login("blacklist@test.com", "password123")
         .await
         .unwrap();
+
     let refresh_token = login.refresh_token.clone();
 
     let first = auth.refresh_token(&refresh_token).await;

@@ -1,6 +1,6 @@
 [package]
 name = "authbox-argon2"
-version = "1.2.3"
+version = "1.2.4"
 edition = "2024"
 description = "Argon2 password hashing for AuthBox"
 license = "Apache-2.0"
@@ -9,7 +9,7 @@ readme = "../../README.md"
 authors = ["anomalous254"]
 
 [dependencies]
-authbox-core = "1.2.3"
+authbox-core = "1.2.4"
 argon2 = {version = "0.5.3",  features=["password-hash"]}
 rand_core = { version="0.6", features=["getrandom"]}
 
