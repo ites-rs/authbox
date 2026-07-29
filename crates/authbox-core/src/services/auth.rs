@@ -3,6 +3,7 @@ use crate::traits::*;
 use tracing::{error, info};
 use uuid::Uuid;
 
+#[derive(Debug)]
 pub enum AuthError<S, T, B, E, O> {
     Store(S),
     Token(T),
