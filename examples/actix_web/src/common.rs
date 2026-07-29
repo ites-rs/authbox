@@ -1,12 +1,12 @@
 #![allow(unused)]
 
+use crate::email_providers::sendgrid_email_provider;
 use async_trait::async_trait;
 use authbox::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
-use crate::email_providers::sendgrid_email_provider;
 
 use super::email_providers::smtp_email_provider;
 
@@ -178,16 +178,11 @@ impl UserStore for TestStore {
 pub struct MockTemplates;
 
 impl EmailTemplateConfig<TestUser> for MockTemplates {
-
     fn verify_email_subject(&self, _: &TestUser) -> String {
         "Verify your email".to_string()
     }
 
-    fn verify_email_body(
-        &self,
-        user: &TestUser,
-        token: &str,
-    ) -> String {
+    fn verify_email_body(&self, user: &TestUser, token: &str) -> String {
         format!(
             "Hello {},
 
@@ -196,8 +191,7 @@ Please verify your email by clicking the link below:
 http://localhost:8080/verify-email/{}
 
 If you did not create this account, you can ignore this email.",
-            user.email,
-            token
+            user.email, token
         )
     }
 
@@ -205,11 +199,7 @@ If you did not create this account, you can ignore this email.",
         "Reset your password".to_string()
     }
 
-    fn reset_password_body(
-        &self,
-        user: &TestUser,
-        token: &str,
-    ) -> String {
+    fn reset_password_body(&self, user: &TestUser, token: &str) -> String {
         format!(
             "Hello {},
 
@@ -220,8 +210,7 @@ Reset your password using the link below:
 http://localhost:8080/reset-password/{}
 
 If you did not request this, ignore this email.",
-            user.email,
-            token
+            user.email, token
         )
     }
 }
@@ -240,7 +229,7 @@ pub type TestAuthService = AuthService<
 >;
 
 pub fn build_test_auth() -> TestAuthService {
-    let client = redis::Client::open("redis://127.0.0.1/").expect("failed to connect to redis"); 
+    let client = redis::Client::open("redis://127.0.0.1/").expect("failed to connect to redis");
 
     AuthService::builder()
         .store(TestStore::new())

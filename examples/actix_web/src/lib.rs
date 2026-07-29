@@ -2,10 +2,10 @@ use actix_web::{App, HttpServer, dev::Server, web};
 
 mod auth_middleware;
 mod common;
+mod email_providers;
 mod handlers;
 mod models;
 mod routes;
-mod email_providers;
 
 use common::*;
 
