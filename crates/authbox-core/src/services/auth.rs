@@ -1,5 +1,6 @@
 use crate::configs::AuthServiceBuilder;
 use crate::traits::*;
+use tracing::{error, info};
 use uuid::Uuid;
 
 #[derive(Debug)]
@@ -76,10 +77,33 @@ impl<S, P, T, B, E, M, V> AuthService<S, P, T, B, E, M, V> {
         let subject = self.email_templates.verify_email_subject(&user);
         let body = self.email_templates.verify_email_body(&user, &token);
 
-        let _ = self
+        info!(
+            user_id = %user.id(),
+            email = %user.email(),
+            "Sending verification email"
+        );
+
+        match self
             .email_sender
             .send_email(user.email(), &subject, &body)
-            .await;
+            .await
+        {
+            Ok(_) => {
+                info!(
+                    user_id = %user.id(),
+                    email = %user.email(),
+                    "Verification email sent successfully"
+                );
+            }
+            Err(err) => {
+                error!(
+                    user_id = %user.id(),
+                    email = %user.email(),
+                    error = ?err,
+                    "Failed to send verification email"
+                );
+            }
+        }
 
         Ok(user)
     }
@@ -230,10 +254,33 @@ impl<S, P, T, B, E, M, V> AuthService<S, P, T, B, E, M, V> {
         let subject = self.email_templates.reset_password_subject(&user);
         let body = self.email_templates.reset_password_body(&user, &token);
 
-        let _ = self
+        info!(
+            user_id = %user.id(),
+            email = %user.email(),
+            "Sending password reset email"
+        );
+
+        match self
             .email_sender
             .send_email(user.email(), &subject, &body)
-            .await;
+            .await
+        {
+            Ok(_) => {
+                info!(
+                    user_id = %user.id(),
+                    email = %user.email(),
+                    "Password reset email sent successfully"
+                );
+            }
+            Err(err) => {
+                error!(
+                    user_id = %user.id(),
+                    email = %user.email(),
+                    error = ?err,
+                    "Failed to send password reset email"
+                );
+            }
+        }
 
         Ok(())
     }

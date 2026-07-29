@@ -1,6 +1,6 @@
 [package]
 name = "authbox-core"
-version = "1.1.2"
+version = "1.2.2"
 edition = "2024"
 description = "Core authentication traits and types for AuthBox"
 license = "Apache-2.0"
@@ -16,6 +16,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 async-trait = "0.1.89"
 uuid = {version="1.23.1", features=["v4"]}
+tracing = "0.1.44"
 
 
 

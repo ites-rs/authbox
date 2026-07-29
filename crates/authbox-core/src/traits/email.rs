@@ -1,9 +1,10 @@
 use super::auth_user::AuthUser;
 use async_trait::async_trait;
+use std::fmt::Debug;
 
 #[async_trait]
 pub trait EmailProvider {
-    type Error;
+    type Error: Debug;
 
     async fn send_email(&self, to: &str, subject: &str, body: &str) -> Result<(), Self::Error>;
 }
