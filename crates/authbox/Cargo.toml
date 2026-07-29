@@ -1,6 +1,6 @@
 [package]
 name = "authbox"
-version = "1.1.4"
+version = "1.1.5"
 edition = "2024"
 description = "A lightweight, modular authentication framework for Rust built around traits, async support, and pluggable component"
 license = "Apache-2.0"
@@ -30,12 +30,12 @@ email-smtp = [
 ]
 
 [dependencies]
-authbox-core = "1.1.2"
+authbox-core = "1.2.2"
 authbox-jwt = "1.1.2"
 authbox-argon2 = "1.1.2"
 authbox-redis = "1.1.2"
 authbox-email = {
-    version = "1.1.4",
+    version = "1.2.4",
     optional = true
 }
 async-trait = "0.1.89"
