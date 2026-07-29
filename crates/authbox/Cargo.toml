@@ -31,9 +31,9 @@ email-smtp = [
 
 [dependencies]
 authbox-core = "1.2.2"
-authbox-jwt = "1.1.2"
-authbox-argon2 = "1.1.2"
-authbox-redis = "1.1.2"
+authbox-jwt = "1.2.2"
+authbox-argon2 = "1.2.2"
+authbox-redis = "1.2.2"
 authbox-email = {
     version = "1.2.4",
     optional = true
