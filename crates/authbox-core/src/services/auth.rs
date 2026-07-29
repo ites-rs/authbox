@@ -3,16 +3,15 @@ use crate::traits::*;
 use tracing::{error, info};
 use uuid::Uuid;
 
-#[derive(Debug)]
-pub enum AuthError<S, T, B, O> {
+pub enum AuthError<S, T, B, E, O> {
     Store(S),
     Token(T),
     Blacklist(B),
+    Email(E),
     Ott(O),
 
     BlacklistedToken,
     EmailAlreadyExists,
-
     NotFound,
     InvalidToken,
     EmailAlreadyVerified,
@@ -46,7 +45,7 @@ impl<S, P, T, B, E, M, V> AuthService<S, P, T, B, E, M, V> {
     pub async fn register(
         &mut self,
         input: S::RegisterDto,
-    ) -> Result<S::User, AuthError<S::Error, T::Error, B::Error, V::Error>>
+    ) -> Result<S::User, AuthError<S::Error, T::Error, B::Error, E::Error, V::Error>>
     where
         S: UserStore,
         P: PasswordHasher,
@@ -56,24 +55,38 @@ impl<S, P, T, B, E, M, V> AuthService<S, P, T, B, E, M, V> {
         M: EmailTemplateConfig<S::User>,
         V: OneTimeTokenStore,
     {
+        // Ensure email is unique
         if self.store.find_by_email(input.email()).await.is_some() {
             return Err(AuthError::EmailAlreadyExists);
         }
 
+        // Hash password
         let hash = self.hasher.hash(input.password());
+
+        // Create user
         let user = self
             .store
             .create_user(input, hash)
             .await
             .map_err(AuthError::Store)?;
 
+        // Create verification token
         let token = Uuid::new_v4().to_string();
 
-        self.ott_store
-            .set(&token, &user.id(), 60 * 60 * 24)
-            .await
-            .map_err(AuthError::Ott)?;
+        // Store verification token
+        if let Err(err) = self.ott_store.set(&token, &user.id(), 60 * 60 * 24).await {
+            if let Err(delete_err) = self.store.delete_user(&user.id()).await {
+                error!(
+                    user_id = %user.id(),
+                    error = ?delete_err,
+                    "Failed to roll back user after token creation failure"
+                );
+            }
 
+            return Err(AuthError::Ott(err));
+        }
+
+        // Build email
         let subject = self.email_templates.verify_email_subject(&user);
         let body = self.email_templates.verify_email_body(&user, &token);
 
@@ -83,27 +96,45 @@ impl<S, P, T, B, E, M, V> AuthService<S, P, T, B, E, M, V> {
             "Sending verification email"
         );
 
-        match self
+        // Send verification email
+        if let Err(err) = self
             .email_sender
             .send_email(user.email(), &subject, &body)
             .await
         {
-            Ok(_) => {
-                info!(
-                    user_id = %user.id(),
-                    email = %user.email(),
-                    "Verification email sent successfully"
+            error!(
+                user_id = %user.id(),
+                email = %user.email(),
+                error = ?err,
+                "Failed to send verification email"
+            );
+
+            // Remove verification token
+            if let Err(delete_err) = self.ott_store.delete(&token).await {
+                error!(
+                    token = %token,
+                    error = ?delete_err,
+                    "Failed to roll back verification token"
                 );
             }
-            Err(err) => {
+
+            // Remove created user
+            if let Err(delete_err) = self.store.delete_user(&user.id()).await {
                 error!(
                     user_id = %user.id(),
-                    email = %user.email(),
-                    error = ?err,
-                    "Failed to send verification email"
+                    error = ?delete_err,
+                    "Failed to roll back created user"
                 );
             }
+
+            return Err(AuthError::Email(err));
         }
+
+        info!(
+            user_id = %user.id(),
+            email = %user.email(),
+            "Verification email sent successfully"
+        );
 
         Ok(user)
     }
@@ -149,7 +180,7 @@ impl<S, P, T, B, E, M, V> AuthService<S, P, T, B, E, M, V> {
     pub async fn refresh_token(
         &self,
         refresh_token: &str,
-    ) -> Result<T::Token, AuthError<(), T::Error, B::Error, V::Error>>
+    ) -> Result<T::Token, AuthError<(), T::Error, B::Error, (), V::Error>>
     where
         T: TokenManager,
         T::Claims: BlacklistableClaims,
@@ -187,7 +218,7 @@ impl<S, P, T, B, E, M, V> AuthService<S, P, T, B, E, M, V> {
     pub async fn verify_email(
         &self,
         token: &str,
-    ) -> Result<(), AuthError<S::Error, (), (), V::Error>>
+    ) -> Result<(), AuthError<S::Error, (), (), (), V::Error>>
     where
         S: UserStore,
         V: OneTimeTokenStore,
@@ -231,7 +262,7 @@ impl<S, P, T, B, E, M, V> AuthService<S, P, T, B, E, M, V> {
     pub async fn request_password_reset(
         &self,
         email: &str,
-    ) -> Result<(), AuthError<S::Error, (), (), V::Error>>
+    ) -> Result<(), AuthError<S::Error, (), (), E::Error, V::Error>>
     where
         S: UserStore,
         V: OneTimeTokenStore,
@@ -260,27 +291,25 @@ impl<S, P, T, B, E, M, V> AuthService<S, P, T, B, E, M, V> {
             "Sending password reset email"
         );
 
-        match self
-            .email_sender
+        self.email_sender
             .send_email(user.email(), &subject, &body)
             .await
-        {
-            Ok(_) => {
-                info!(
-                    user_id = %user.id(),
-                    email = %user.email(),
-                    "Password reset email sent successfully"
-                );
-            }
-            Err(err) => {
+            .map_err(|err| {
                 error!(
                     user_id = %user.id(),
                     email = %user.email(),
                     error = ?err,
                     "Failed to send password reset email"
                 );
-            }
-        }
+
+                AuthError::Email(err)
+            })?;
+
+        info!(
+            user_id = %user.id(),
+            email = %user.email(),
+            "Password reset email sent successfully"
+        );
 
         Ok(())
     }
@@ -290,7 +319,7 @@ impl<S, P, T, B, E, M, V> AuthService<S, P, T, B, E, M, V> {
         &self,
         token: &str,
         new_password: &str,
-    ) -> Result<(), AuthError<S::Error, (), (), V::Error>>
+    ) -> Result<(), AuthError<S::Error, (), (), (), V::Error>>
     where
         S: UserStore,
         P: PasswordHasher,
@@ -326,7 +355,7 @@ impl<S, P, T, B, E, M, V> AuthService<S, P, T, B, E, M, V> {
     pub async fn logout(
         &self,
         refresh_token: &str,
-    ) -> Result<(), AuthError<(), T::Error, B::Error, ()>>
+    ) -> Result<(), AuthError<(), T::Error, B::Error, (), ()>>
     where
         T: TokenManager,
         T::Claims: BlacklistableClaims,
@@ -352,7 +381,7 @@ impl<S, P, T, B, E, M, V> AuthService<S, P, T, B, E, M, V> {
     pub async fn is_token_valid(
         &self,
         token: &str,
-    ) -> Result<T::Claims, AuthError<(), T::Error, B::Error, V::Error>>
+    ) -> Result<T::Claims, AuthError<(), T::Error, B::Error, (), V::Error>>
     where
         T: TokenManager,
         T::Claims: BlacklistableClaims,

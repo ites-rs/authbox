@@ -1,10 +1,11 @@
 use super::auth_user::AuthUser;
 use super::register_user::RegisterUserInput;
 use async_trait::async_trait;
+use std::fmt::Debug;
 
 #[async_trait]
 pub trait UserStore {
-    type Error;
+    type Error: Debug;
     type User: AuthUser;
     type RegisterDto: RegisterUserInput;
 
