@@ -10,7 +10,7 @@ It is designed for applications that need customizable authentication logic with
 
 ## Documentation
 
-**Full documentations, guides, examples, and architecture overview available here:**
+**Full documentation, guides, examples, and architecture overview available here:**
 
 [AuthBox Docs](https://authbox-docs.vercel.app/)
 
