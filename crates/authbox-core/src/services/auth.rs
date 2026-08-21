@@ -42,7 +42,7 @@ impl<S, P, T, B, E, M, V> AuthService<S, P, T, B, E, M, V> {
         AuthServiceBuilder::new()
     }
 
-    /// Register a new user
+    /// Register a new user account
     pub async fn register(
         &mut self,
         input: S::RegisterDto,
