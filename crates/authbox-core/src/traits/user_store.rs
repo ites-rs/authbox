@@ -1,22 +1,18 @@
 use super::auth_user::AuthUser;
 use super::register_user::RegisterUserInput;
+use crate::errors::BoxError;
 use async_trait::async_trait;
-use std::fmt::Debug;
 
 #[async_trait]
-pub trait UserStore {
-    type Error: Debug;
-    type User: AuthUser;
-    type RegisterDto: RegisterUserInput;
-
-    async fn find_by_id(&self, user_id: &str) -> Option<Self::User>;
-    async fn find_by_email(&self, email: &str) -> Option<Self::User>;
+pub trait UserStore: Send + Sync {
+    async fn find_by_id(&self, user_id: &str) -> Result<Option<Box<dyn AuthUser>>, BoxError>;
+    async fn find_by_email(&self, email: &str) -> Result<Option<Box<dyn AuthUser>>, BoxError>;
     async fn create_user(
         &self,
-        input: Self::RegisterDto,
+        input: &dyn RegisterUserInput,
         pass_hash: String,
-    ) -> Result<Self::User, Self::Error>;
-    async fn update_user(&self, user: Self::User) -> Result<Self::User, Self::Error>;
-    async fn delete_user(&self, user_id: &str) -> Result<(), Self::Error>;
-    async fn check_email_verified(&self, user_id: &str) -> Result<bool, Self::Error>;
+    ) -> Result<Box<dyn AuthUser>, BoxError>;
+    async fn update_user(&self, user: Box<dyn AuthUser>) -> Result<Box<dyn AuthUser>, BoxError>;
+    async fn delete_user(&self, user_id: &str) -> Result<(), BoxError>;
+    async fn check_email_verified(&self, user_id: &str) -> Result<bool, BoxError>;
 }

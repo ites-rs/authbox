@@ -1,406 +1,493 @@
 use crate::configs::AuthServiceBuilder;
+use crate::errors::AuthError;
 use crate::traits::*;
+use crate::types::{Claims, Me, TokenPair, TokenType};
+use std::sync::Arc;
+use tracing::warn;
 use tracing::{error, info};
 use uuid::Uuid;
 
-#[derive(Debug)]
-pub enum AuthError<S, T, B, E, O> {
-    Store(S),
-    Token(T),
-    Blacklist(B),
-    Email(E),
-    Ott(O),
+const VERIFY: &str = "verify";
+const RESET: &str = "reset";
+const VERIFY_TTL: u64 = 60 * 60 * 24;
+const RESET_TTL: u64 = 60 * 15;
+const M_CACHE_HITS: &str = "authbox_cache_hits_total";
+const M_CACHE_MISSES: &str = "authbox_cache_misses_total";
+const M_CACHE_READ_FAIL: &str = "authbox_cache_read_failures_total";
+const M_CACHE_WRITE_FAIL: &str = "authbox_cache_write_failures_total";
+const M_CACHE_INVALIDATE_FAIL: &str = "authbox_cache_invalidate_failures_total";
 
-    BlacklistedToken,
-    EmailAlreadyExists,
-    NotFound,
-    InvalidToken,
-    EmailAlreadyVerified,
+pub(crate) struct Inner {
+    pub(crate) store: Box<dyn UserStore>,
+    pub(crate) hasher: Box<dyn PasswordHasher>,
+    pub(crate) tokens: Box<dyn TokenManager>,
+    pub(crate) blacklist: Box<dyn TokenBlacklistStore>,
+    pub(crate) email_sender: Box<dyn EmailProvider>,
+    pub(crate) email_templates: Box<dyn EmailTemplateConfig>,
+    pub(crate) ott_store: Box<dyn OneTimeTokenStore>,
+    pub(crate) cache: Option<Box<dyn UserCache>>,
+    /// verified against for unknown emails so login timing doesn't leak accounts
+    pub(crate) dummy_hash: String,
 }
 
-#[derive(Debug)]
-pub enum LoginError<T, S> {
-    InvalidCredentials,
-    EmailNotVerified,
-    Store(S),
-    Token(T),
+#[derive(Clone)]
+pub struct AuthService {
+    pub(crate) inner: Arc<Inner>,
 }
 
-#[derive(Debug, Clone)]
-pub struct AuthService<S, P, T, B, E, M, V> {
-    pub store: S,
-    pub hasher: P,
-    pub tokens: T,
-    pub blacklist: B,
-    pub email_sender: E,
-    pub email_templates: M,
-    pub ott_store: V,
-}
+impl AuthService {
+    pub fn builder() -> AuthServiceBuilder {
+        AuthServiceBuilder::default()
+    }
 
-impl<S, P, T, B, E, M, V> AuthService<S, P, T, B, E, M, V> {
-    pub fn builder() -> AuthServiceBuilder<S, P, T, B, E, M, V> {
-        AuthServiceBuilder::new()
+    pub(crate) fn new(
+        store: Box<dyn UserStore>,
+        hasher: Box<dyn PasswordHasher>,
+        tokens: Box<dyn TokenManager>,
+        blacklist: Box<dyn TokenBlacklistStore>,
+        email_sender: Box<dyn EmailProvider>,
+        email_templates: Box<dyn EmailTemplateConfig>,
+        ott_store: Box<dyn OneTimeTokenStore>,
+        cache: Option<Box<dyn UserCache>>,
+    ) -> Self {
+        let dummy_hash = hasher.hash(&Uuid::new_v4().to_string());
+
+        Self {
+            inner: Arc::new(Inner {
+                store,
+                hasher,
+                tokens,
+                blacklist,
+                email_sender,
+                email_templates,
+                ott_store,
+                cache,
+                dummy_hash,
+            }),
+        }
+    }
+
+    async fn hash_password(&self, password: String) -> Result<String, AuthError> {
+        let inner = self.inner.clone();
+        tokio::task::spawn_blocking(move || inner.hasher.hash(&password))
+            .await
+            .map_err(|e| AuthError::Internal(Box::new(e)))
+    }
+
+    async fn verify_password(&self, password: String, hash: String) -> Result<bool, AuthError> {
+        let inner = self.inner.clone();
+        tokio::task::spawn_blocking(move || inner.hasher.verify(&password, &hash))
+            .await
+            .map_err(|e| AuthError::Internal(Box::new(e)))
+    }
+
+    /// checks signature + expiry + token type + blacklist + session cutoff
+    async fn check(&self, token: &str, expected: TokenType) -> Result<Claims, AuthError> {
+        let auth_service = &self.inner;
+        let claims = auth_service
+            .tokens
+            .verify(token)
+            .await
+            .map_err(|_| AuthError::InvalidToken)?;
+
+        if claims.typ != expected {
+            return Err(AuthError::InvalidToken);
+        }
+        if auth_service
+            .blacklist
+            .is_blacklisted(claims.jti())
+            .await
+            .map_err(AuthError::Blacklist)?
+        {
+            return Err(AuthError::BlacklistedToken);
+        }
+
+        // all of this user's sessions revoked after this token was issued?
+        if let Some(cutoff) = auth_service
+            .blacklist
+            .sessions_revoked_before(&claims.sub)
+            .await
+            .map_err(AuthError::Blacklist)?
+        {
+            if claims.iat <= cutoff {
+                return Err(AuthError::InvalidToken);
+            }
+        }
+
+        Ok(claims)
+    }
+
+    async fn rollback_user(&self, user_id: &str) {
+        if let Err(e) = self.inner.store.delete_user(user_id).await {
+            error!(user_id = %user_id, error = ?e, "Failed to roll back created user");
+        }
+        if let Err(e) = self.invalidate_user_cache(user_id).await {
+            error!(user_id = %user_id, error = ?e, "Failed to invalidate cache during rollback");
+        }
+    }
+
+    pub async fn invalidate_user_cache(&self, user_id: &str) -> Result<(), AuthError> {
+        match &self.inner.cache {
+            Some(cache) => cache.invalidate(user_id).await.map_err(|e| {
+                metrics::counter!(M_CACHE_INVALIDATE_FAIL).increment(1);
+                AuthError::Cache(e)
+            }),
+            None => Ok(()),
+        }
+    }
+
+    fn check_password_length(password: &str) -> Result<&str, AuthError> {
+        let n = password.chars().count();
+        if (12..=128).contains(&n) {
+            Ok(password)
+        } else {
+            Err(AuthError::password_length())
+        }
+    }
+
+    fn normalize_email(email: &str) -> String {
+        email.trim().to_lowercase()
+    }
+
+    /// verification and reset tokens can no longer be swapped for each other
+    fn ott_key(purpose: &str, token: &str) -> String {
+        format!("{purpose}:{token}")
+    }
+
+    /// current time in unix SECONDS (same unit as `iat` in Claims)
+    fn now_unix_secs() -> i64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock before 1970")
+            .as_secs() as i64
     }
 
     /// Register a new user account
     pub async fn register(
-        &mut self,
-        input: S::RegisterDto,
-    ) -> Result<S::User, AuthError<S::Error, T::Error, B::Error, E::Error, V::Error>>
-    where
-        S: UserStore,
-        P: PasswordHasher,
-        T: TokenManager,
-        B: TokenBlacklistStore,
-        E: EmailProvider,
-        M: EmailTemplateConfig<S::User>,
-        V: OneTimeTokenStore,
-    {
-        // Ensure email is unique
-        if self.store.find_by_email(input.email()).await.is_some() {
+        &self,
+        input: &dyn RegisterUserInput,
+    ) -> Result<Box<dyn AuthUser>, AuthError> {
+        let password = Self::check_password_length(input.password())?;
+        let auth_service = &self.inner;
+
+        if auth_service
+            .store
+            .find_by_email(&Self::normalize_email(input.email()))
+            .await
+            .map_err(AuthError::Store)?
+            .is_some()
+        {
             return Err(AuthError::EmailAlreadyExists);
         }
 
-        // Hash password
-        let hash = self.hasher.hash(input.password());
+        let hash = self.hash_password(password.to_owned()).await?;
 
-        // Create user
-        let user = self
+        let user = auth_service
             .store
             .create_user(input, hash)
             .await
             .map_err(AuthError::Store)?;
+        let user_id = user.id();
 
-        // Create verification token
         let token = Uuid::new_v4().to_string();
+        let key = Self::ott_key(VERIFY, &token);
 
-        // Store verification token
-        if let Err(err) = self.ott_store.set(&token, &user.id(), 60 * 60 * 24).await {
-            if let Err(delete_err) = self.store.delete_user(&user.id()).await {
-                error!(
-                    user_id = %user.id(),
-                    error = ?delete_err,
-                    "Failed to roll back user after token creation failure"
-                );
-            }
-
+        if let Err(err) = auth_service.ott_store.set(&key, &user_id, VERIFY_TTL).await {
+            self.rollback_user(&user_id).await;
             return Err(AuthError::Ott(err));
         }
 
-        // Build email
-        let subject = self.email_templates.verify_email_subject(&user);
-        let body = self.email_templates.verify_email_body(&user, &token);
+        let subject = auth_service
+            .email_templates
+            .verify_email_subject(user.as_ref());
+        let body = auth_service
+            .email_templates
+            .verify_email_body(user.as_ref(), &token);
 
-        info!(
-            user_id = %user.id(),
-            email = %user.email(),
-            "Sending verification email"
-        );
+        info!(user_id = %user_id, "Sending verification email");
 
-        // Send verification email
-        if let Err(err) = self
+        if let Err(err) = auth_service
             .email_sender
             .send_email(user.email(), &subject, &body)
             .await
         {
-            error!(
-                user_id = %user.id(),
-                email = %user.email(),
-                error = ?err,
-                "Failed to send verification email"
-            );
+            error!(user_id = %user_id,  error = ?err,
+                   "Failed to send verification email");
 
-            // Remove verification token
-            if let Err(delete_err) = self.ott_store.delete(&token).await {
-                error!(
-                    token = %token,
-                    error = ?delete_err,
-                    "Failed to roll back verification token"
-                );
+            if let Err(e) = auth_service.ott_store.delete(&key).await {
+                error!(error = ?e, "Failed to roll back verification token");
             }
-
-            // Remove created user
-            if let Err(delete_err) = self.store.delete_user(&user.id()).await {
-                error!(
-                    user_id = %user.id(),
-                    error = ?delete_err,
-                    "Failed to roll back created user"
-                );
-            }
-
+            self.rollback_user(&user_id).await;
             return Err(AuthError::Email(err));
         }
 
-        info!(
-            user_id = %user.id(),
-            email = %user.email(),
-            "Verification email sent successfully"
-        );
-
+        info!(user_id = %user_id, "Verification email sent successfully");
         Ok(user)
     }
 
-    /// Login
-    pub async fn login(
-        &self,
-        email: &str,
-        password: &str,
-    ) -> Result<T::Token, LoginError<T::Error, S::Error>>
-    where
-        S: UserStore,
-        P: PasswordHasher,
-        T: TokenManager,
-    {
-        let user = self
-            .store
-            .find_by_email(email)
-            .await
-            .ok_or(LoginError::InvalidCredentials)?;
+    /// Login. Password is checked BEFORE revealing verification status.
+    pub async fn login(&self, email: &str, password: &str) -> Result<TokenPair, AuthError> {
+        let auth_service = &self.inner;
 
-        let verified = self
+        let found = auth_service
             .store
-            .check_email_verified(&user.id())
+            .find_by_email(&Self::normalize_email(email))
             .await
-            .map_err(LoginError::Store)?;
+            .map_err(AuthError::Store)?;
 
-        if !verified {
-            return Err(LoginError::EmailNotVerified);
+        // always run exactly one Argon2 verify, even for unknown emails
+        let hash = found
+            .as_ref()
+            .map(|u| u.password_hash().to_owned())
+            .unwrap_or_else(|| auth_service.dummy_hash.clone());
+        let ok = self.verify_password(password.to_owned(), hash).await?;
+
+        let user = found.filter(|_| ok).ok_or(AuthError::InvalidCredentials)?;
+
+        if !user.is_email_verified() {
+            return Err(AuthError::EmailNotVerified);
         }
 
-        if !self.hasher.verify(password, user.password_hash()) {
-            return Err(LoginError::InvalidCredentials);
-        }
-
-        self.tokens
-            .generate(&user.id())
-            .await
-            .map_err(LoginError::Token)
-    }
-
-    /// Refresh token
-    pub async fn refresh_token(
-        &self,
-        refresh_token: &str,
-    ) -> Result<T::Token, AuthError<(), T::Error, B::Error, (), V::Error>>
-    where
-        T: TokenManager,
-        T::Claims: BlacklistableClaims,
-        B: TokenBlacklistStore,
-        V: OneTimeTokenStore,
-    {
-        let claims = self
+        auth_service
             .tokens
-            .verify(refresh_token)
-            .await
-            .map_err(AuthError::Token)?;
-
-        let blacklisted = self
-            .blacklist
-            .is_blacklisted(claims.jti())
-            .await
-            .map_err(AuthError::Blacklist)?;
-
-        if blacklisted {
-            return Err(AuthError::BlacklistedToken);
-        }
-
-        self.blacklist
-            .blacklist_token(claims.jti(), claims.exp())
-            .await
-            .map_err(AuthError::Blacklist)?;
-
-        self.tokens
-            .refresh(refresh_token)
+            .generate(&user.id())
             .await
             .map_err(AuthError::Token)
     }
 
-    /// Verify email
-    pub async fn verify_email(
-        &self,
-        token: &str,
-    ) -> Result<(), AuthError<S::Error, (), (), (), V::Error>>
-    where
-        S: UserStore,
-        V: OneTimeTokenStore,
-    {
-        let user_id = self
+    /// Current user data , The token is always validated; only user data is cached.
+    pub async fn me(&self, access_token: &str) -> Result<Me, AuthError> {
+        let claims = self.is_token_valid(access_token).await?;
+        let auth_service = &self.inner;
+
+        if let Some(cache) = &auth_service.cache {
+            match cache.get(&claims.sub).await {
+                Ok(Some(json)) => match serde_json::from_str::<Me>(&json) {
+                    Ok(me) => {
+                        metrics::counter!(M_CACHE_HITS).increment(1);
+                        return Ok(me);
+                    }
+                    // unreadable entry: treat as a miss and overwrite it below
+                    Err(e) => warn!(error = ?e, "cached user entry unreadable"),
+                },
+                Ok(None) => {
+                    metrics::counter!(M_CACHE_MISSES).increment(1);
+                }
+                Err(e) => {
+                    metrics::counter!(M_CACHE_READ_FAIL).increment(1);
+                    warn!(error = ?e, "user cache read failed, using store");
+                }
+            }
+        }
+
+        let user = auth_service
+            .store
+            .find_by_id(&claims.sub)
+            .await
+            .map_err(AuthError::Store)?
+            .ok_or(AuthError::NotFound)?;
+
+        let me = Me::new(
+            user.id(),
+            user.email().to_owned(),
+            user.is_email_verified(),
+            user.extra(),
+        );
+
+        if let Some(cache) = &auth_service.cache {
+            match serde_json::to_string(&me) {
+                Ok(json) => {
+                    if let Err(e) = cache.set(&claims.sub, &json, None).await {
+                        metrics::counter!(M_CACHE_WRITE_FAIL).increment(1);
+                        warn!(error = ?e, "user cache write failed");
+                    }
+                }
+                Err(e) => error!(error = ?e, "could not serialize Me"),
+            }
+        }
+
+        Ok(me)
+    }
+
+    /// Rotate: verify refresh token -> blacklist it -> issue a new pair.
+    pub async fn refresh_token(&self, refresh_token: &str) -> Result<TokenPair, AuthError> {
+        let auth_service = &self.inner;
+        let claims = self.check(refresh_token, TokenType::Refresh).await?;
+
+        let newly_revoked = auth_service
+            .blacklist
+            .blacklist_token(claims.jti(), claims.exp())
+            .await
+            .map_err(AuthError::Blacklist)?;
+        if !newly_revoked {
+            return Err(AuthError::BlacklistedToken);
+        }
+
+        let pair = auth_service
+            .tokens
+            .generate(&claims.sub)
+            .await
+            .map_err(AuthError::Token)?;
+
+        // close the millisecond  window, was the user revoked while we were generating?
+        if let Some(cutoff) = auth_service
+            .blacklist
+            .sessions_revoked_before(&claims.sub)
+            .await
+            .map_err(AuthError::Blacklist)?
+        {
+            if claims.iat <= cutoff {
+                return Err(AuthError::InvalidToken);
+            }
+        }
+
+        Ok(pair)
+    }
+
+    pub async fn verify_email(&self, token: &str) -> Result<(), AuthError> {
+        let auth_service = &self.inner;
+        let key = Self::ott_key(VERIFY, token);
+
+        let user_id = auth_service
             .ott_store
-            .get(token)
+            .get(&key)
             .await
             .map_err(AuthError::Ott)?
             .ok_or(AuthError::InvalidToken)?;
 
-        let mut user = self
+        let mut user = auth_service
             .store
             .find_by_id(&user_id)
             .await
+            .map_err(AuthError::Store)?
             .ok_or(AuthError::NotFound)?;
 
-        let is_verified = self
-            .store
-            .check_email_verified(&user_id)
-            .await
-            .map_err(AuthError::Store)?;
-
-        if is_verified {
+        if user.is_email_verified() {
             return Err(AuthError::EmailAlreadyVerified);
         }
 
         user.set_email_verified(true);
-
-        self.store
+        auth_service
+            .store
             .update_user(user)
             .await
             .map_err(AuthError::Store)?;
 
-        self.ott_store.delete(token).await.map_err(AuthError::Ott)?;
-
-        Ok(())
-    }
-
-    /// Request password reset
-    pub async fn request_password_reset(
-        &self,
-        email: &str,
-    ) -> Result<(), AuthError<S::Error, (), (), E::Error, V::Error>>
-    where
-        S: UserStore,
-        V: OneTimeTokenStore,
-        M: EmailTemplateConfig<S::User>,
-        E: EmailProvider,
-    {
-        let user = self
-            .store
-            .find_by_email(email)
-            .await
-            .ok_or(AuthError::NotFound)?;
-
-        let token = Uuid::new_v4().to_string();
-
-        self.ott_store
-            .set(&token, &user.id(), 60 * 15)
+        auth_service
+            .ott_store
+            .delete(&key)
             .await
             .map_err(AuthError::Ott)?;
 
-        let subject = self.email_templates.reset_password_subject(&user);
-        let body = self.email_templates.reset_password_body(&user, &token);
-
-        info!(
-            user_id = %user.id(),
-            email = %user.email(),
-            "Sending password reset email"
-        );
-
-        self.email_sender
-            .send_email(user.email(), &subject, &body)
-            .await
-            .map_err(|err| {
-                error!(
-                    user_id = %user.id(),
-                    email = %user.email(),
-                    error = ?err,
-                    "Failed to send password reset email"
-                );
-
-                AuthError::Email(err)
-            })?;
-
-        info!(
-            user_id = %user.id(),
-            email = %user.email(),
-            "Password reset email sent successfully"
-        );
+        if let Err(e) = self.invalidate_user_cache(&user_id).await {
+            warn!(user_id = %user_id, error = ?e, "cache invalidate failed; entry expires with its TTL");
+        }
 
         Ok(())
     }
 
-    /// Reset password
-    pub async fn reset_password(
-        &self,
-        token: &str,
-        new_password: &str,
-    ) -> Result<(), AuthError<S::Error, (), (), (), V::Error>>
-    where
-        S: UserStore,
-        P: PasswordHasher,
-        V: OneTimeTokenStore,
-    {
-        let user_id = self
+    /// Returns `Ok(())` for unknown emails so the endpoint can't be used to
+    /// discover which emails are registered.
+    pub async fn request_password_reset(&self, email: &str) -> Result<(), AuthError> {
+        let auth_service = &self.inner;
+
+        let Some(user) = auth_service
+            .store
+            .find_by_email(&Self::normalize_email(email))
+            .await
+            .map_err(AuthError::Store)?
+        else {
+            return Ok(());
+        };
+
+        let token = Uuid::new_v4().to_string();
+        auth_service
             .ott_store
-            .get(token)
+            .set(&Self::ott_key(RESET, &token), &user.id(), RESET_TTL)
+            .await
+            .map_err(AuthError::Ott)?;
+
+        let subject = auth_service
+            .email_templates
+            .reset_password_subject(user.as_ref());
+        let body = auth_service
+            .email_templates
+            .reset_password_body(user.as_ref(), &token);
+
+        info!(user_id = %user.id(), "Sending password reset email");
+
+        // logged, not returned: an error only for real accounts would leak existence
+        if let Err(err) = auth_service
+            .email_sender
+            .send_email(user.email(), &subject, &body)
+            .await
+        {
+            error!(user_id = %user.id(), error = ?err, "Failed to send password reset email");
+        }
+        Ok(())
+    }
+
+    pub async fn reset_password(&self, token: &str, new_password: &str) -> Result<(), AuthError> {
+        let new_password = Self::check_password_length(new_password)?;
+        let auth_service = &self.inner;
+        let key = Self::ott_key(RESET, token);
+    
+        // Atomic read + delete. Of two simultaneous requests, only one gets Some(..).
+        let user_id = auth_service
+            .ott_store
+            .take(&key)
             .await
             .map_err(AuthError::Ott)?
             .ok_or(AuthError::InvalidToken)?;
-
-        let mut user = self
+    
+        let mut user = auth_service
             .store
             .find_by_id(&user_id)
             .await
+            .map_err(AuthError::Store)?
             .ok_or(AuthError::NotFound)?;
-
-        let password_hash = self.hasher.hash(new_password);
-        user.set_password_hash(password_hash);
-
-        self.store
+    
+        let hash = self.hash_password(new_password.to_owned()).await?;
+        user.set_password_hash(hash);
+        auth_service
+            .store
             .update_user(user)
             .await
             .map_err(AuthError::Store)?;
-
-        self.ott_store.delete(token).await.map_err(AuthError::Ott)?;
-
-        Ok(())
+    
+        // Void every session issued before this moment.
+        auth_service
+            .blacklist
+            .revoke_user_sessions(
+                &user_id,
+                Self::now_unix_secs(),
+                auth_service.tokens.refresh_ttl_secs(),
+            )
+            .await
+            .map_err(AuthError::Blacklist)
     }
 
-    /// Logout by blacklisting the refresh token
-    pub async fn logout(
-        &self,
-        refresh_token: &str,
-    ) -> Result<(), AuthError<(), T::Error, B::Error, (), ()>>
-    where
-        T: TokenManager,
-        T::Claims: BlacklistableClaims,
-        B: TokenBlacklistStore,
-    {
-        // Verify the refresh token to extract claims (like JTI and exp)
-        let claims = self
+    /// Logout by blacklisting the refresh token (idempotent).
+    pub async fn logout(&self, refresh_token: &str) -> Result<(), AuthError> {
+        let auth_service = &self.inner;
+        let claims = auth_service
             .tokens
             .verify(refresh_token)
             .await
-            .map_err(AuthError::Token)?;
-
-        // Blacklist this token until it naturally expires
-        self.blacklist
+            .map_err(|_| AuthError::InvalidToken)?;
+        if claims.typ != TokenType::Refresh {
+            return Err(AuthError::InvalidToken);
+        }
+        auth_service
+            .blacklist
             .blacklist_token(claims.jti(), claims.exp())
             .await
             .map_err(AuthError::Blacklist)?;
-
         Ok(())
     }
 
-    /// Check token
-    pub async fn is_token_valid(
-        &self,
-        token: &str,
-    ) -> Result<T::Claims, AuthError<(), T::Error, B::Error, (), V::Error>>
-    where
-        T: TokenManager,
-        T::Claims: BlacklistableClaims,
-        B: TokenBlacklistStore,
-        V: OneTimeTokenStore,
-    {
-        let claims = self.tokens.verify(token).await.map_err(AuthError::Token)?;
-
-        let blacklisted = self
-            .blacklist
-            .is_blacklisted(claims.jti())
-            .await
-            .map_err(AuthError::Blacklist)?;
-
-        if blacklisted {
-            return Err(AuthError::BlacklistedToken);
-        }
-
-        Ok(claims)
+    /// Use in auth middleware / extractors. Only ACCESS tokens pass.
+    pub async fn is_token_valid(&self, token: &str) -> Result<Claims, AuthError> {
+        self.check(token, TokenType::Access).await
     }
 }
