@@ -56,7 +56,7 @@ impl AuthError {
             Self::EmailNotVerified => 403,
             Self::NotFound => 404,
             Self::EmailAlreadyExists | Self::EmailAlreadyVerified => 409,
-             Self::RateLimited => 429, 
+            Self::RateLimited => 429,
             _ => 500,
         }
     }

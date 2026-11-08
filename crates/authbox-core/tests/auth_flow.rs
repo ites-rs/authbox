@@ -3,7 +3,7 @@ mod common;
 use authbox_core::errors::AuthError;
 use common::*;
 
-// ------------------------------------------------------------ register ----
+// register
 
 #[tokio::test]
 async fn register_sends_one_verification_email() {
@@ -35,7 +35,7 @@ async fn register_rolls_back_when_the_email_cannot_be_sent() {
     assert_eq!(h.ott.len(), 0, "verification token must be rolled back");
 }
 
-// ------------------------------------------------------ password policy ----
+// password policy
 
 #[tokio::test]
 async fn password_length_is_enforced_on_register() {
@@ -61,14 +61,14 @@ async fn password_length_is_enforced_on_register() {
 async fn password_length_counts_characters_not_bytes() {
     let h = Harness::new();
 
-    // 12 chars = 24 bytes -> accepted
+    // 12 chars = 24 bytes, should be accepted
     assert!(
         h.auth
             .register(&reg("a@x.com", &"é".repeat(12)))
             .await
             .is_ok()
     );
-    // 11 chars = 22 bytes (more than 12 bytes) -> must still be rejected
+    // 11 chars = 22 bytes (more than 12 bytes) but still too short
     let res = h.auth.register(&reg("b@x.com", &"é".repeat(11))).await;
     assert!(matches!(res, Err(AuthError::PasswordLength { .. })));
 }
@@ -81,7 +81,7 @@ async fn a_rejected_password_creates_no_user() {
     assert_eq!(h.mailer.count(), 0);
 }
 
-// --------------------------------------------------------- verify email ----
+// verify email
 
 #[tokio::test]
 async fn unverified_user_cannot_log_in() {
@@ -121,7 +121,7 @@ async fn unknown_verification_token_is_rejected() {
     assert!(matches!(res, Err(AuthError::InvalidToken)));
 }
 
-// ---------------------------------------------------------------- login ----
+// login
 
 #[tokio::test]
 async fn login_ignores_email_case_and_surrounding_spaces() {
@@ -151,7 +151,7 @@ async fn unknown_email_and_wrong_password_look_identical() {
     assert_eq!(unknown.public_message(), wrong.public_message());
 }
 
-// ------------------------------------------------------- password reset ----
+// password reset
 
 #[tokio::test]
 async fn reset_request_for_unknown_email_succeeds_silently() {
@@ -171,6 +171,7 @@ async fn reset_request_for_known_email_sends_one_email() {
     let before = h.mailer.count();
 
     h.auth.request_password_reset("a@x.com").await.unwrap();
+    h.wait_for_mail(before + 1).await;
     assert_eq!(h.mailer.count(), before + 1);
 }
 
@@ -180,7 +181,7 @@ async fn reset_request_still_succeeds_when_email_sending_fails() {
     h.register_verified("a@x.com", PW).await;
     h.mailer.set_fail(true);
 
-    // an error here would reveal that the account exists
+    // an error here would tell the caller the account exists
     assert!(h.auth.request_password_reset("a@x.com").await.is_ok());
 }
 
@@ -188,8 +189,7 @@ async fn reset_request_still_succeeds_when_email_sending_fails() {
 async fn reset_changes_the_password() {
     let h = Harness::new();
     h.register_verified("a@x.com", PW).await;
-    h.auth.request_password_reset("a@x.com").await.unwrap();
-    let token = h.last_mail_token();
+    let token = h.request_reset_token("a@x.com").await;
 
     h.auth.reset_password(&token, PW2).await.unwrap();
 
@@ -202,8 +202,7 @@ async fn reset_changes_the_password() {
 async fn reset_token_works_once() {
     let h = Harness::new();
     h.register_verified("a@x.com", PW).await;
-    h.auth.request_password_reset("a@x.com").await.unwrap();
-    let token = h.last_mail_token();
+    let token = h.request_reset_token("a@x.com").await;
 
     h.auth.reset_password(&token, PW2).await.unwrap();
     let again = h
@@ -217,22 +216,20 @@ async fn reset_token_works_once() {
 async fn reset_enforces_the_password_policy_without_burning_the_token() {
     let h = Harness::new();
     h.register_verified("a@x.com", PW).await;
-    h.auth.request_password_reset("a@x.com").await.unwrap();
-    let token = h.last_mail_token();
+    let token = h.request_reset_token("a@x.com").await;
 
     let weak = h.auth.reset_password(&token, "short").await;
     assert!(matches!(weak, Err(AuthError::PasswordLength { .. })));
 
-    // the same token still works with a valid password
+    // same token should still work with a good password
     assert!(h.auth.reset_password(&token, PW2).await.is_ok());
 }
 
 #[tokio::test]
 async fn reset_token_is_rejected_as_verify_token() {
     let h = Harness::new();
-    h.register("a@x.com", PW).await; // unverified
-    h.auth.request_password_reset("a@x.com").await.unwrap();
-    let reset_token = h.last_mail_token();
+    h.register("a@x.com", PW).await; // not verified
+    let reset_token = h.request_reset_token("a@x.com").await;
 
     let res = h.auth.verify_email(&reset_token).await;
     assert!(matches!(res, Err(AuthError::InvalidToken)));
@@ -248,7 +245,7 @@ async fn verify_token_is_rejected_as_reset_token() {
     assert!(matches!(res, Err(AuthError::InvalidToken)));
 }
 
-// ------------------------------------------- sessions revoked on reset ----
+// sessions revoked on reset
 
 #[tokio::test]
 async fn password_reset_revokes_existing_sessions() {
@@ -257,20 +254,17 @@ async fn password_reset_revokes_existing_sessions() {
     let old = h.login("a@x.com", PW).await;
     assert!(h.auth.is_token_valid(&old.access_token).await.is_ok());
 
-    h.auth.request_password_reset("a@x.com").await.unwrap();
-    h.auth
-        .reset_password(&h.last_mail_token(), PW2)
-        .await
-        .unwrap();
+    let token = h.request_reset_token("a@x.com").await;
+    h.auth.reset_password(&token, PW2).await.unwrap();
 
-    // the stolen-token scenario: neither token works, and refresh cannot resurrect the session
+    // stolen token case: neither token works and refresh can't bring the session back
     let access = h.auth.is_token_valid(&old.access_token).await;
     assert!(matches!(access, Err(AuthError::InvalidToken)));
     let refresh = h.auth.refresh_token(&old.refresh_token).await;
     assert!(matches!(refresh, Err(AuthError::InvalidToken)));
 
-    // a fresh login after the reset works (the clock is moved forward so the
-    // new token's `iat` is later than the revoke cutoff)
+    // logging in again works. we move the clock forward so the new token's
+    // iat is later than the revoke cutoff
     h.clock.advance(5);
     let fresh = h.login("a@x.com", PW2).await;
     assert!(h.auth.is_token_valid(&fresh.access_token).await.is_ok());
@@ -285,11 +279,8 @@ async fn password_reset_does_not_affect_other_users() {
     let a = h.login("a@x.com", PW).await;
     let b = h.login("b@x.com", PW).await;
 
-    h.auth.request_password_reset("a@x.com").await.unwrap();
-    h.auth
-        .reset_password(&h.last_mail_token(), PW2)
-        .await
-        .unwrap();
+    let token = h.request_reset_token("a@x.com").await;
+    h.auth.reset_password(&token, PW2).await.unwrap();
 
     assert!(h.auth.is_token_valid(&a.access_token).await.is_err());
     assert!(h.auth.is_token_valid(&b.access_token).await.is_ok());

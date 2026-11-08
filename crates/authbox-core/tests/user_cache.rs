@@ -93,13 +93,10 @@ async fn me_still_rejects_a_revoked_token_when_the_user_is_cached() {
     let h = Harness::with_cache(MemCache::default());
     h.register_verified("a@x.com", PW).await;
     let pair = h.login("a@x.com", PW).await;
-    h.auth.me(&pair.access_token).await.unwrap(); // now cached
+    h.auth.me(&pair.access_token).await.unwrap(); // now it's cached
 
-    h.auth.request_password_reset("a@x.com").await.unwrap();
-    h.auth
-        .reset_password(&h.last_mail_token(), PW2)
-        .await
-        .unwrap();
+    let token = h.request_reset_token("a@x.com").await;
+    h.auth.reset_password(&token, PW2).await.unwrap();
 
     let res = h.auth.me(&pair.access_token).await;
     assert!(matches!(res, Err(AuthError::InvalidToken)));
@@ -108,10 +105,10 @@ async fn me_still_rejects_a_revoked_token_when_the_user_is_cached() {
 #[tokio::test]
 async fn verify_email_refreshes_a_cached_me() {
     let h = Harness::with_cache(MemCache::default());
-    let user = h.register("a@x.com", PW).await; // unverified
+    let user = h.register("a@x.com", PW).await; // not verified yet
     let verify_token = h.last_mail_token();
 
-    // unverified users cannot log in, so mint a token directly
+    // unverified users can't log in, so make a token by hand
     let access = h.tokens.generate(&user.id()).await.unwrap().access_token;
     assert!(!h.auth.me(&access).await.unwrap().email_verified); // cached as false
 

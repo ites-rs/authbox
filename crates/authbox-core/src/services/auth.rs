@@ -162,7 +162,13 @@ impl AuthService {
             .as_secs() as i64
     }
 
-    /// Register a new user account
+    /// Register a new user account.
+    ///
+    /// The `find_by_email` check below is only a fast path. It is NOT safe on
+    /// its own: two simultaneous signups can both pass it. Your database MUST
+    /// have a UNIQUE index on the (normalized) email column, and
+    /// `UserStore::create_user` MUST map a unique-violation error to
+    /// `AuthError::EmailAlreadyExists` (see `map_store_create_err`).
     pub async fn register(
         &self,
         input: &dyn RegisterUserInput,
@@ -186,7 +192,7 @@ impl AuthService {
             .store
             .create_user(input, hash)
             .await
-            .map_err(AuthError::Store)?;
+            .map_err(Self::map_store_create_err)?;
         let user_id = user.id();
 
         let token = Uuid::new_v4().to_string();
@@ -211,7 +217,7 @@ impl AuthService {
             .send_email(user.email(), &subject, &body)
             .await
         {
-            error!(user_id = %user_id,  error = ?err,
+            error!(user_id = %user_id, error = ?err,
                    "Failed to send verification email");
 
             if let Err(e) = auth_service.ott_store.delete(&key).await {
@@ -223,6 +229,30 @@ impl AuthService {
 
         info!(user_id = %user_id, "Verification email sent successfully");
         Ok(user)
+    }
+
+    /// Maps an error from `UserStore::create_user` to an `AuthError`.
+    ///
+    /// TODO: replace the body with a check for YOUR store's unique-violation
+    /// error, e.g. for sqlx + Postgres:
+    ///
+    /// ```ignore
+    /// if let Some(db) = e.downcast_ref::<sqlx::Error>()
+    ///     .and_then(|e| e.as_database_error())
+    /// {
+    ///     if db.is_unique_violation() {
+    ///         return AuthError::EmailAlreadyExists;
+    ///     }
+    /// }
+    /// ```
+    ///
+    /// Alternatively, have your store return `AuthError::EmailAlreadyExists`
+    /// wrapped in the BoxError and downcast it here.
+    fn map_store_create_err(e: crate::errors::BoxError) -> AuthError {
+        if let Some(AuthError::EmailAlreadyExists) = e.downcast_ref::<AuthError>() {
+            return AuthError::EmailAlreadyExists;
+        }
+        AuthError::Store(e)
     }
 
     /// Login. Password is checked BEFORE revealing verification status.
@@ -255,7 +285,7 @@ impl AuthService {
             .map_err(AuthError::Token)
     }
 
-    /// Current user data , The token is always validated; only user data is cached.
+    /// Current user data. The token is always validated; only user data is cached.
     pub async fn me(&self, access_token: &str) -> Result<Me, AuthError> {
         let claims = self.is_token_valid(access_token).await?;
         let auth_service = &self.inner;
@@ -329,7 +359,7 @@ impl AuthService {
             .await
             .map_err(AuthError::Token)?;
 
-        // close the millisecond  window, was the user revoked while we were generating?
+        // close the millisecond window: was the user revoked while we were generating?
         if let Some(cutoff) = auth_service
             .blacklist
             .sessions_revoked_before(&claims.sub)
@@ -344,40 +374,57 @@ impl AuthService {
         Ok(pair)
     }
 
+    /// Verify an email address.
+    ///
+    /// The token is claimed atomically with `take` (read + delete in one step),
+    /// so two simultaneous requests can't both use it. If a transient failure
+    /// happens after the claim, the token is put back so the user can retry.
     pub async fn verify_email(&self, token: &str) -> Result<(), AuthError> {
         let auth_service = &self.inner;
         let key = Self::ott_key(VERIFY, token);
 
         let user_id = auth_service
             .ott_store
-            .get(&key)
+            .take(&key)
             .await
             .map_err(AuthError::Ott)?
             .ok_or(AuthError::InvalidToken)?;
 
-        let mut user = auth_service
-            .store
-            .find_by_id(&user_id)
-            .await
-            .map_err(AuthError::Store)?
-            .ok_or(AuthError::NotFound)?;
+        let result: Result<(), AuthError> = async {
+            let mut user = auth_service
+                .store
+                .find_by_id(&user_id)
+                .await
+                .map_err(AuthError::Store)?
+                .ok_or(AuthError::NotFound)?;
 
-        if user.is_email_verified() {
-            return Err(AuthError::EmailAlreadyVerified);
+            if user.is_email_verified() {
+                return Err(AuthError::EmailAlreadyVerified);
+            }
+
+            user.set_email_verified(true);
+            auth_service
+                .store
+                .update_user(user)
+                .await
+                .map_err(AuthError::Store)?;
+            Ok(())
         }
+        .await;
 
-        user.set_email_verified(true);
-        auth_service
-            .store
-            .update_user(user)
-            .await
-            .map_err(AuthError::Store)?;
-
-        auth_service
-            .ott_store
-            .delete(&key)
-            .await
-            .map_err(AuthError::Ott)?;
+        if let Err(e) = &result {
+            // Permanent outcomes: the token is correctly spent.
+            // Anything else is transient: give the token back.
+            if !matches!(e, AuthError::EmailAlreadyVerified | AuthError::NotFound) {
+                if let Err(restore_err) =
+                    auth_service.ott_store.set(&key, &user_id, VERIFY_TTL).await
+                {
+                    error!(user_id = %user_id, error = ?restore_err,
+                           "Failed to restore verification token after error");
+                }
+            }
+            return result;
+        }
 
         if let Err(e) = self.invalidate_user_cache(&user_id).await {
             warn!(user_id = %user_id, error = ?e, "cache invalidate failed; entry expires with its TTL");
@@ -431,7 +478,7 @@ impl AuthService {
         let new_password = Self::check_password_length(new_password)?;
         let auth_service = &self.inner;
         let key = Self::ott_key(RESET, token);
-    
+
         // Atomic read + delete. Of two simultaneous requests, only one gets Some(..).
         let user_id = auth_service
             .ott_store
@@ -439,14 +486,14 @@ impl AuthService {
             .await
             .map_err(AuthError::Ott)?
             .ok_or(AuthError::InvalidToken)?;
-    
+
         let mut user = auth_service
             .store
             .find_by_id(&user_id)
             .await
             .map_err(AuthError::Store)?
             .ok_or(AuthError::NotFound)?;
-    
+
         let hash = self.hash_password(new_password.to_owned()).await?;
         user.set_password_hash(hash);
         auth_service
@@ -454,12 +501,136 @@ impl AuthService {
             .update_user(user)
             .await
             .map_err(AuthError::Store)?;
-    
+
         // Void every session issued before this moment.
         auth_service
             .blacklist
             .revoke_user_sessions(
                 &user_id,
+                Self::now_unix_secs(),
+                auth_service.tokens.refresh_ttl_secs(),
+            )
+            .await
+            .map_err(AuthError::Blacklist)?;
+
+        if let Err(e) = self.invalidate_user_cache(&user_id).await {
+            warn!(user_id = %user_id, error = ?e, "cache invalidate failed; entry expires with its TTL");
+        }
+
+        Ok(())
+    }
+
+    /// Change password for a logged-in user who knows the current one.
+    ///
+    /// `user_id` MUST come from a validated access token (`is_token_valid`),
+    /// never from request input. All sessions are revoked afterwards, including
+    /// the caller's own, so the client has to log in again with the new password.
+    pub async fn change_password(
+        &self,
+        user_id: &str,
+        old_password: &str,
+        new_password: &str,
+    ) -> Result<(), AuthError> {
+        let new_password = Self::check_password_length(new_password)?;
+        let auth_service = &self.inner;
+
+        let mut user = auth_service
+            .store
+            .find_by_id(user_id)
+            .await
+            .map_err(AuthError::Store)?
+            .ok_or(AuthError::NotFound)?;
+
+        let ok = self
+            .verify_password(old_password.to_owned(), user.password_hash().to_owned())
+            .await?;
+        if !ok {
+            return Err(AuthError::InvalidCredentials);
+        }
+
+        let hash = self.hash_password(new_password.to_owned()).await?;
+        user.set_password_hash(hash);
+        auth_service
+            .store
+            .update_user(user)
+            .await
+            .map_err(AuthError::Store)?;
+
+        // Void every session issued before this moment.
+        auth_service
+            .blacklist
+            .revoke_user_sessions(
+                user_id,
+                Self::now_unix_secs(),
+                auth_service.tokens.refresh_ttl_secs(),
+            )
+            .await
+            .map_err(AuthError::Blacklist)?;
+
+        if let Err(e) = self.invalidate_user_cache(user_id).await {
+            warn!(user_id = %user_id, error = ?e, "cache invalidate failed; entry expires with its TTL");
+        }
+
+        Ok(())
+    }
+
+    /// Permanently delete the account after re-checking the password.
+    ///
+    /// `user_id` MUST come from a validated access token. Sessions are revoked
+    /// BEFORE the delete: if the delete then fails the user is just logged out
+    /// and can retry, whereas the other order could leave live tokens for an
+    /// account that no longer exists.
+    pub async fn delete_account(&self, user_id: &str, password: &str) -> Result<(), AuthError> {
+        let auth_service = &self.inner;
+
+        let user = auth_service
+            .store
+            .find_by_id(user_id)
+            .await
+            .map_err(AuthError::Store)?
+            .ok_or(AuthError::NotFound)?;
+
+        let ok = self
+            .verify_password(password.to_owned(), user.password_hash().to_owned())
+            .await?;
+        if !ok {
+            return Err(AuthError::InvalidCredentials);
+        }
+
+        auth_service
+            .blacklist
+            .revoke_user_sessions(
+                user_id,
+                Self::now_unix_secs(),
+                auth_service.tokens.refresh_ttl_secs(),
+            )
+            .await
+            .map_err(AuthError::Blacklist)?;
+
+        auth_service
+            .store
+            .delete_user(user_id)
+            .await
+            .map_err(AuthError::Store)?;
+
+        if let Err(e) = self.invalidate_user_cache(user_id).await {
+            warn!(user_id = %user_id, error = ?e, "cache invalidate failed; entry expires with its TTL");
+        }
+
+        info!(user_id = %user_id, "Account deleted");
+        Ok(())
+    }
+
+    /// Log the user out of every device by voiding all sessions issued so far.
+    ///
+    /// `user_id` MUST come from a validated access token. Tokens issued after
+    /// this call (a fresh login) work normally.
+    pub async fn logout_all(&self, user_id: &str) -> Result<(), AuthError> {
+        let auth_service = &self.inner;
+        auth_service
+            .blacklist
+            .revoke_user_sessions(
+                user_id,
                 Self::now_unix_secs(),
                 auth_service.tokens.refresh_ttl_secs(),
             )

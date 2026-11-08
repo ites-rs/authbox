@@ -1,5 +1,5 @@
-use crate::types::{Claims, TokenPair};
 use crate::errors::BoxError;
+use crate::types::{Claims, TokenPair};
 use async_trait::async_trait;
 
 #[async_trait]

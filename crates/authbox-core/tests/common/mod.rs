@@ -1,28 +1,27 @@
-//! In-memory implementations of every authbox trait, plus a small `Harness`
-//! that wires them into an `AuthService`.
-//!
-//! Every double is `Clone` and shares its state through an `Arc`, so a test can
-//! hand one copy to the builder and keep another to inspect afterwards.
+// in-memory versions of all the authbox traits + a Harness that wires them
+// into an AuthService.
+//
+// everything here is Clone and shares state through an Arc, so a test can give
+// one copy to the builder and keep another to look at afterwards.
 #![allow(dead_code)]
 
 use async_trait::async_trait;
-use authbox_core::services::AuthService;
 use authbox_core::prelude::*;
+use authbox_core::services::AuthService;
 use std::any::Any;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering::SeqCst};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-
 pub const PW: &str = "correct-horse-battery"; // 21 chars
 pub const PW2: &str = "a-brand-new-password-1"; // 22 chars
 
-// ---------------------------------------------------------------- clock ----
+// clock
 
-/// Real time plus an offset the test controls. Lets tests "wait" without
-/// sleeping. The service itself uses the real clock for the revoke cutoff, so
-/// a token issued after `advance(n)` has `iat` greater than any earlier cutoff.
+// real time + an offset the test controls, so we can "wait" without sleeping.
+// the service itself uses the real clock for the revoke cutoff, so a token
+// made after advance(n) has an iat bigger than any earlier cutoff
 #[derive(Clone, Default)]
 pub struct Clock(Arc<AtomicI64>);
 
@@ -34,12 +33,13 @@ impl Clock {
             .as_secs() as i64;
         real + self.0.load(SeqCst)
     }
+
     pub fn advance(&self, secs: i64) {
         self.0.fetch_add(secs, SeqCst);
     }
 }
 
-// --------------------------------------------------------------- hasher ----
+// hasher
 
 pub struct FakeHasher;
 
@@ -47,14 +47,16 @@ impl PasswordHasher for FakeHasher {
     fn hash(&self, password: &str) -> String {
         format!("hashed:{password}")
     }
+
     fn verify(&self, password: &str, hash: &str) -> bool {
         hash == format!("hashed:{password}")
     }
 }
 
-// --------------------------------------------------------------- tokens ----
+// tokens
 
-/// Tokens look like `access|sub|jti-3|iat|exp`. Not secure, just parseable.
+// tokens look like access|sub|jti-3|iat|exp
+// not secure at all, just easy to parse
 #[derive(Clone)]
 pub struct TestTokens {
     clock: Clock,
@@ -124,7 +126,7 @@ impl TokenManager for TestTokens {
     }
 }
 
-// ------------------------------------------------------------ blacklist ----
+// blacklist
 
 #[derive(Clone, Default)]
 pub struct MemBlacklist {
@@ -134,9 +136,9 @@ pub struct MemBlacklist {
 }
 
 impl MemBlacklist {
-    /// Makes `is_blacklisted` wait until `n` callers have reached it, so that
-    /// `n` concurrent requests all pass the "not blacklisted" check before any
-    /// of them gets to blacklist the token. This forces the real race.
+    // makes is_blacklisted wait until n callers are in it. that way n parallel
+    // requests all pass the "not blacklisted" check before any of them
+    // blacklists the token, which is the race we want to hit
     pub fn gate_is_blacklisted(&self, n: usize) {
         *self.gate.lock().unwrap() = Some(Arc::new(tokio::sync::Barrier::new(n)));
     }
@@ -153,7 +155,7 @@ impl TokenBlacklistStore for MemBlacklist {
         Ok(seen)
     }
 
-    /// Same contract as Redis `SET NX`: true only for the call that inserted it.
+    // like redis SET NX, only the call that actually inserted gets true
     async fn blacklist_token(&self, jti: &str, _expires_at: i64) -> Result<bool, BoxError> {
         Ok(self.jtis.lock().unwrap().insert(jti.to_owned()))
     }
@@ -176,7 +178,7 @@ impl TokenBlacklistStore for MemBlacklist {
     }
 }
 
-// ---------------------------------------------------------------- email ----
+// email
 
 #[derive(Clone, Debug)]
 pub struct Sent {
@@ -195,9 +197,11 @@ impl MemMailer {
     pub fn set_fail(&self, v: bool) {
         self.fail.store(v, SeqCst);
     }
+
     pub fn count(&self) -> usize {
         self.sent.lock().unwrap().len()
     }
+
     pub fn last(&self) -> Option<Sent> {
         self.sent.lock().unwrap().last().cloned()
     }
@@ -218,25 +222,28 @@ impl EmailProvider for MemMailer {
     }
 }
 
-/// The email body is just the token, so tests can read it straight back.
+// the email body is just the token so tests can read it back easily
 pub struct TestTemplates;
 
 impl EmailTemplateConfig for TestTemplates {
     fn verify_email_subject(&self, _user: &dyn AuthUser) -> String {
         "verify".into()
     }
+
     fn verify_email_body(&self, _user: &dyn AuthUser, token: &str) -> String {
         token.to_owned()
     }
+
     fn reset_password_subject(&self, _user: &dyn AuthUser) -> String {
         "reset".into()
     }
+
     fn reset_password_body(&self, _user: &dyn AuthUser, token: &str) -> String {
         token.to_owned()
     }
 }
 
-// ------------------------------------------------------- one-time tokens ----
+// one-time tokens
 
 #[derive(Clone, Default)]
 pub struct MemOtt(Arc<Mutex<HashMap<String, String>>>);
@@ -256,23 +263,24 @@ impl OneTimeTokenStore for MemOtt {
             .insert(key.to_owned(), value.to_owned());
         Ok(())
     }
+
     async fn get(&self, key: &str) -> Result<Option<String>, BoxError> {
         Ok(self.0.lock().unwrap().get(key).cloned())
     }
+
     async fn delete(&self, key: &str) -> Result<(), BoxError> {
         self.0.lock().unwrap().remove(key);
         Ok(())
     }
 
-    /// Same contract as Redis `GETDEL`: remove and return under one lock, so
-    /// exactly one concurrent caller gets `Some`. The std Mutex is never held
-    /// across an `.await`.
+    // like redis GETDEL: remove and return under one lock so only one caller
+    // gets Some. the mutex is never held across an await
     async fn take(&self, key: &str) -> Result<Option<String>, BoxError> {
         Ok(self.0.lock().unwrap().remove(key))
     }
 }
 
-// ------------------------------------------------------------ user cache ----
+// user cache
 
 #[derive(Clone, Default)]
 pub struct MemCache {
@@ -281,15 +289,17 @@ pub struct MemCache {
 }
 
 impl MemCache {
-    /// A cache whose every operation returns an error.
+    // every call on this one returns an error
     pub fn failing() -> Self {
         let c = Self::default();
         c.set_fail(true);
         c
     }
+
     pub fn set_fail(&self, v: bool) {
         self.fail.store(v, SeqCst);
     }
+
     pub fn len(&self) -> usize {
         self.map.lock().unwrap().len()
     }
@@ -303,6 +313,7 @@ impl UserCache for MemCache {
         }
         Ok(self.map.lock().unwrap().get(user_id).cloned())
     }
+
     async fn set(
         &self,
         user_id: &str,
@@ -318,6 +329,7 @@ impl UserCache for MemCache {
             .insert(user_id.to_owned(), value.to_owned());
         Ok(())
     }
+
     async fn invalidate(&self, user_id: &str) -> Result<(), BoxError> {
         if self.fail.load(SeqCst) {
             return Err("cache down".into());
@@ -327,7 +339,7 @@ impl UserCache for MemCache {
     }
 }
 
-// ----------------------------------------------------------- user + store ----
+// user + store
 
 #[derive(Clone, Debug)]
 pub struct TestUser {
@@ -341,21 +353,27 @@ impl AuthUser for TestUser {
     fn id(&self) -> String {
         self.id.clone()
     }
+
     fn email(&self) -> &str {
         &self.email
     }
+
     fn password_hash(&self) -> &str {
         &self.hash
     }
+
     fn is_email_verified(&self) -> bool {
         self.verified
     }
+
     fn set_email_verified(&mut self, verified: bool) {
         self.verified = verified;
     }
+
     fn set_password_hash(&mut self, hash: String) {
         self.hash = hash;
     }
+
     fn extra(&self) -> Option<serde_json::Value> {
         Some(serde_json::json!({ "role": "tester" }))
     }
@@ -377,9 +395,11 @@ impl RegisterUserInput for TestRegister {
     fn email(&self) -> &str {
         &self.email
     }
+
     fn password(&self) -> &str {
         &self.password
     }
+
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -396,6 +416,7 @@ impl MemStore {
     pub fn user_count(&self) -> usize {
         self.users.lock().unwrap().len()
     }
+
     pub fn find_by_id_calls(&self) -> usize {
         self.find_by_id_calls.load(SeqCst)
     }
@@ -421,9 +442,9 @@ impl UserStore for MemStore {
             .map(boxed))
     }
 
-    /// The service only normalises emails for lookups, so a store must save the
-    /// normalised form itself. This double does. The duplicate check and the
-    /// insert happen under one lock, like a UNIQUE index would.
+    // the service only normalizes emails for lookups, so the store has to save
+    // the normalized one itself, and this one does. the duplicate check and the
+    // insert happen under one lock, same as a UNIQUE index would
     async fn create_user(
         &self,
         input: &dyn RegisterUserInput,
@@ -475,7 +496,7 @@ impl UserStore for MemStore {
     }
 }
 
-// --------------------------------------------------------------- harness ----
+// harness
 
 pub struct Harness {
     pub auth: AuthService,
@@ -488,7 +509,7 @@ pub struct Harness {
 }
 
 impl Harness {
-    /// No cache configured.
+    // no cache
     pub fn new() -> Self {
         Self::build(None)
     }
@@ -528,13 +549,13 @@ impl Harness {
         }
     }
 
-    /// Token from the most recent email (verification or reset).
+    // token from the last email sent (verify or reset)
     pub fn last_mail_token(&self) -> String {
         self.mailer.last().expect("no email was sent").body
     }
 
-    /// Waits until at least `n` emails have been sent (polls up to ~2s).
-    /// Needed because `request_password_reset` now sends from a background task.
+    // waits until n emails have gone out, polls for up to ~2s.
+    // needed because request_password_reset sends from a background task now
     pub async fn wait_for_mail(&self, n: usize) {
         for _ in 0..200 {
             if self.mailer.count() >= n {
@@ -545,7 +566,7 @@ impl Harness {
         panic!("expected {n} emails, got {}", self.mailer.count());
     }
 
-    /// Request a password reset and return the token from the email it sends.
+    // asks for a reset and returns the token from the email
     pub async fn request_reset_token(&self, email: &str) -> String {
         let before = self.mailer.count();
         self.auth
@@ -556,7 +577,7 @@ impl Harness {
         self.last_mail_token()
     }
 
-    /// Register, but do not verify.
+    // register but don't verify
     pub async fn register(&self, email: &str, password: &str) -> Box<dyn AuthUser> {
         self.auth
             .register(&reg(email, password))
@@ -564,7 +585,7 @@ impl Harness {
             .expect("register failed")
     }
 
-    /// Register and verify. Returns the user id.
+    // register + verify, returns the user id
     pub async fn register_verified(&self, email: &str, password: &str) -> String {
         let user = self.register(email, password).await;
         self.auth
