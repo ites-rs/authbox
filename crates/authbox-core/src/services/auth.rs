@@ -40,6 +40,7 @@ impl AuthService {
         AuthServiceBuilder::default()
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         store: Box<dyn UserStore>,
         hasher: Box<dyn PasswordHasher>,
@@ -108,10 +109,9 @@ impl AuthService {
             .sessions_revoked_before(&claims.sub)
             .await
             .map_err(AuthError::Blacklist)?
+            && claims.iat <= cutoff
         {
-            if claims.iat <= cutoff {
-                return Err(AuthError::InvalidToken);
-            }
+            return Err(AuthError::InvalidToken);
         }
 
         Ok(claims)
@@ -365,10 +365,9 @@ impl AuthService {
             .sessions_revoked_before(&claims.sub)
             .await
             .map_err(AuthError::Blacklist)?
+            && claims.iat <= cutoff
         {
-            if claims.iat <= cutoff {
-                return Err(AuthError::InvalidToken);
-            }
+            return Err(AuthError::InvalidToken);
         }
 
         Ok(pair)
@@ -415,14 +414,14 @@ impl AuthService {
         if let Err(e) = &result {
             // Permanent outcomes: the token is correctly spent.
             // Anything else is transient: give the token back.
-            if !matches!(e, AuthError::EmailAlreadyVerified | AuthError::NotFound) {
-                if let Err(restore_err) =
+            if !matches!(e, AuthError::EmailAlreadyVerified | AuthError::NotFound)
+                && let Err(restore_err) =
                     auth_service.ott_store.set(&key, &user_id, VERIFY_TTL).await
-                {
-                    error!(user_id = %user_id, error = ?restore_err,
+            {
+                error!(user_id = %user_id, error = ?restore_err,
                            "Failed to restore verification token after error");
-                }
             }
+
             return result;
         }
 
