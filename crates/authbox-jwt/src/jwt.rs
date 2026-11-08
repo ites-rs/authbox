@@ -1,18 +1,18 @@
 use async_trait::async_trait;
 use authbox_core::prelude::{BoxError, Claims, TokenManager, TokenPair, TokenType};
 use chrono::Utc;
-use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
+use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, encode};
 use std::time::Duration;
 use uuid::Uuid;
 
 const MIN_SECRET_BYTES: usize = 32;
 
-const DEFAULT_ACCESS: Duration = Duration::from_secs(60 * 15);            // 15 minutes
-const DEFAULT_REFRESH: Duration = Duration::from_secs(60 * 60 * 24 * 7);  // 7 days
+const DEFAULT_ACCESS: Duration = Duration::from_secs(60 * 15); // 15 minutes
+const DEFAULT_REFRESH: Duration = Duration::from_secs(60 * 60 * 24 * 7); // 7 days
 
-const MIN_ACCESS: Duration = Duration::from_secs(60);                     // 1 minute
-const MAX_ACCESS: Duration = Duration::from_secs(60 * 60);                // 1 hour
-const MAX_REFRESH: Duration = Duration::from_secs(60 * 60 * 24 * 90);     // 90 days
+const MIN_ACCESS: Duration = Duration::from_secs(60); // 1 minute
+const MAX_ACCESS: Duration = Duration::from_secs(60 * 60); // 1 hour
+const MAX_REFRESH: Duration = Duration::from_secs(60 * 60 * 24 * 90); // 90 days
 
 #[derive(Clone)]
 pub struct DefaultJwtManager {
@@ -63,7 +63,11 @@ impl DefaultJwtManager {
             exp: now + ttl_secs as i64,
             typ,
         };
-        Ok(encode(&Header::new(Algorithm::HS256), &claims, &self.encoding)?)
+        Ok(encode(
+            &Header::new(Algorithm::HS256),
+            &claims,
+            &self.encoding,
+        )?)
     }
 }
 

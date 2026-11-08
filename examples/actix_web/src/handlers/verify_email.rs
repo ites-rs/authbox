@@ -8,14 +8,11 @@ pub async fn verify_email(
     state: web::Data<AppState>,
     body: web::Json<VerifyEmailRequest>,
 ) -> impl Responder {
-    let auth = state.auth.lock().await;
-
-    match auth.verify_email(&body.token).await {
+    match state.auth.verify_email(&body.token).await {
         Ok(_) => HttpResponse::Ok().json(json!({
             "success": true,
             "message": "Email verified successfully"
         })),
-
         Err(e) => HttpResponse::BadRequest().json(json!({
             "success": false,
             "error": format!("{:?}", e)

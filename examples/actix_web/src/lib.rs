@@ -1,4 +1,5 @@
 use actix_web::{App, HttpServer, dev::Server, web};
+use authbox::prelude::AuthService;
 
 mod auth_middleware;
 mod common;
@@ -12,19 +13,20 @@ use common::*;
 use routes::config;
 
 pub struct AppState {
-    pub auth: tokio::sync::Mutex<TestAuthService>,
+    pub auth: AuthService,
 }
 
-pub fn server() -> Result<Server, std::io::Error> {
-    println!("Server running at http://127.0.0.1:8080");
+pub async fn server() -> Result<Server, std::io::Error> {
+    // build the auth service first; the redis stores are created asynchronously
+    let auth = build_test_auth().await.map_err(std::io::Error::other)?;
 
-    let state = web::Data::new(AppState {
-        auth: tokio::sync::Mutex::new(build_test_auth()),
-    });
+    let state = web::Data::new(AppState { auth });
 
     let server = HttpServer::new(move || App::new().app_data(state.clone()).configure(config))
         .bind(("127.0.0.1", 8080))?
         .run();
+
+    println!("Server running at http://127.0.0.1:8080");
 
     Ok(server)
 }

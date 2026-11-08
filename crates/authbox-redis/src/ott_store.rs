@@ -1,6 +1,6 @@
 use async_trait::async_trait;
-use authbox_core::traits::OneTimeTokenStore;
 use authbox_core::errors::BoxError;
+use authbox_core::traits::OneTimeTokenStore;
 use redis::AsyncCommands;
 
 /// Redis-backed [`OneTimeTokenStore`].
