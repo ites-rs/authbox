@@ -1,6 +1,6 @@
 [package]
 name = "authbox-email"
-version = "3.0.0-rc.1"
+version = "3.0.0-rc.2"
 edition = "2024"
 description = "Email provider implementations for AuthBox"
 license = "Apache-2.0"
