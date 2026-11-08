@@ -8,5 +8,6 @@ members = [
   "crates/authbox",
   "examples/actix_web",
   "crates/authbox-redis",
-  "crates/authbox-email",
+  "crates/authbox-email", 
+  "crates/authbox-cache",
 ]
