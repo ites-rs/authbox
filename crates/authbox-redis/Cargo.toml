@@ -1,6 +1,6 @@
 [package]
 name = "authbox-redis"
-version = "1.2.4"
+version = "3.0.0-rc.1"
 edition = "2024"
 description = "Redis-backed implementations for AuthBox one-time tokens and token blacklisting"
 license = "Apache-2.0"
@@ -9,7 +9,7 @@ readme = "../../README.md"
 authors = ["anomalous254"]
 
 [dependencies]
-authbox-core = "1.2.4"
-redis = { version = "1.2.2", features = ["tokio-comp"] }
+authbox-core = "3.0.0-rc.1"
+redis = { version = "1.2.2", features = ["tokio-comp", "connection-manager"] }
 async-trait = "0.1.89"
 chrono = "0.4.44"
