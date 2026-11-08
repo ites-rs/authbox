@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use authbox_core::prelude::BoxError;
 use authbox_core::traits::EmailProvider;
 use resend_rs::{Resend, types::CreateEmailBaseOptions};
 
@@ -19,9 +20,7 @@ impl ResendEmailProvider {
 
 #[async_trait]
 impl EmailProvider for ResendEmailProvider {
-    type Error = resend_rs::Error;
-
-    async fn send_email(&self, to: &str, subject: &str, body: &str) -> Result<(), Self::Error> {
+    async fn send_email(&self, to: &str, subject: &str, body: &str) -> Result<(), BoxError> {
         let email = CreateEmailBaseOptions::new(&self.from, [to], subject).with_html(body);
 
         self.client.emails.send(email).await?;

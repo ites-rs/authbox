@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use authbox_core::prelude::BoxError;
 use authbox_core::traits::EmailProvider;
 use reqwest::Client;
 use serde_json::json;
@@ -28,9 +29,7 @@ impl SendGridEmailProvider {
 
 #[async_trait]
 impl EmailProvider for SendGridEmailProvider {
-    type Error = reqwest::Error;
-
-    async fn send_email(&self, to: &str, subject: &str, body: &str) -> Result<(), Self::Error> {
+    async fn send_email(&self, to: &str, subject: &str, body: &str) -> Result<(), BoxError> {
         self.client
             .post("https://api.sendgrid.com/v3/mail/send")
             .bearer_auth(&self.api_key)
