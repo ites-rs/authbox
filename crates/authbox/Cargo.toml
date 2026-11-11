@@ -1,6 +1,6 @@
 [package]
 name = "authbox"
-version = "3.0.0-rc.2"
+version = "3.0.0"
 edition = "2024"
 description = "A lightweight, modular authentication framework for Rust built around traits, async support, and pluggable component"
 license = "Apache-2.0"
@@ -30,12 +30,12 @@ email-smtp = [
 ]
 
 [dependencies]
-authbox-core = "3.0.0-rc.1"
-authbox-jwt = "3.0.0-rc.1"
-authbox-cache = "0.1.0"
-authbox-argon2 = "3.0.0-rc.1"
-authbox-redis = "3.0.0-rc.1"
-authbox-email = { version = "3.0.0-rc.2" , optional = true}
+authbox-core = "3.0.0"
+authbox-jwt = "3.0.0"
+authbox-cache = "3.0.0"
+authbox-argon2 = "3.0.0"
+authbox-redis = "3.0.0"
+authbox-email = { version = "3.0.0" , optional = true}
 async-trait = "0.1.89"
 tokio = { version = "1", features = ["full"] }
 redis = { version = "1.2.2", features = ["tokio-comp"] }
