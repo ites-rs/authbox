@@ -5,7 +5,7 @@
 //! tests only. the redis helper expects a server on 127.0.0.1.
 #![allow(unused)]
 
-use crate::email_providers::sendgrid_email_provider;
+use crate::email_providers::resend_email_provider;
 use async_trait::async_trait;
 use authbox::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -193,6 +193,7 @@ impl EmailTemplateConfig for MockTemplates {
     }
 
     fn verify_email_body(&self, user: &dyn AuthUser, token: &str) -> String {
+        println!("TOKEN, {token}");
         format!(
             "Hello {},
 
@@ -211,6 +212,7 @@ If you did not create this account, you can ignore this email.",
     }
 
     fn reset_password_body(&self, user: &dyn AuthUser, token: &str) -> String {
+        println!("RESEt, TOKEN, {token}");
         format!(
             "Hello {},
 
@@ -242,7 +244,7 @@ pub async fn build_test_auth() -> Result<AuthService, Box<dyn std::error::Error 
             None,
         )?)
         .blacklist(RedisBlacklistStore::new(client.clone()).await?)
-        .email_sender(sendgrid_email_provider())
+        .email_sender(resend_email_provider())
         .email_templates(MockTemplates)
         .ott_store(RedisOttStore::new(client))
         .user_cache(DefaultMemoryUserCache::default())

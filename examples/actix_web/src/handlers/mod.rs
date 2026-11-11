@@ -7,3 +7,5 @@ pub mod refresh_token;
 pub mod register;
 pub mod reset_password;
 pub mod verify_email;
+
+pub use logout::logout_all;
