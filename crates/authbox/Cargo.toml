@@ -30,7 +30,7 @@ email-smtp = [
 ]
 
 [dependencies]
-authbox-core = "3.0.0"
+authbox-core = "3.1.0"
 authbox-jwt = "3.0.0"
 authbox-cache = "3.0.0"
 authbox-argon2 = "3.0.0"

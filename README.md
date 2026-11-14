@@ -52,7 +52,7 @@ The user store and the email templates have no default because they depend on yo
 * Refresh token rotation (each refresh token can be used once)
 * Refresh token revocation and blacklisting
 * Session revocation: invalidate every token a user has issued so far
-* Email verification flow
+* Email verification flow, including re-sending the verification email on request
 * Password reset flow with 15 minute reset tokens
 * Change password for logged in users
 * Account deletion with password confirmation
@@ -116,6 +116,10 @@ Here is every other method you will use in a real app:
 // returns the Claims, so claims.sub is the user id
 let claims = auth.is_token_valid(&access_token).await?;
 
+// re-send a verification email, e.g. when the user clicks "didn't get the email"
+// returns Ok(()) for unknown addresses and already-verified accounts
+auth.request_verify_email("user@example.com").await?;
+
 // forgot password: sends a reset email
 // returns Ok(()) even for unknown emails, so always show the same message
 auth.request_password_reset("user@example.com").await?;
@@ -164,6 +168,7 @@ Handlers can then read the user with `web::ReqData<Claims>`.
 |---|---|
 | `register` | Creates a user and sends a verification email. Rolls the user back if the email cannot be sent. |
 | `verify_email` | Verifies an email address using a one-time token. |
+| `request_verify_email` | Re-sends a verification email. Always returns `Ok` so registered emails cannot be discovered. Does nothing for unknown or already-verified addresses. |
 | `login` | Checks credentials and returns a token pair. |
 | `me` | Returns the current user. The token is always validated, only user data is cached. |
 | `refresh_token` | Rotates a refresh token and issues a new pair. |
@@ -185,6 +190,8 @@ Handlers can then read the user with `web::ReqData<Claims>`.
 **Login timing.** A password hash is verified even when the email is unknown, so response times do not reveal which accounts exist. The password is checked before the verification status is revealed.
 
 **Password reset.** `request_password_reset` returns the same result whether or not the email exists, and email send failures are logged instead of returned.
+
+**Verification re-send.** `request_verify_email` behaves the same way — it returns `Ok(())` for unknown addresses and accounts that are already verified, so it cannot be used to check whether a given email is registered.
 
 **One-time tokens.** Tokens are claimed atomically with `take`, so two simultaneous requests cannot both use the same token. Verification and reset tokens are namespaced and cannot be swapped for each other. If a temporary failure happens while verifying an email, the token is restored so the user can try again.
 
@@ -240,6 +247,7 @@ The test fixtures include an in-memory `UserStore`, a sample registration DTO wi
 - [x] Session revocation on password reset, password change and account deletion
 - [x] Logout from all devices
 - [x] Email verification
+- [x] Re-send verification email
 - [x] Password reset flow
 - [x] Change password
 - [x] Account deletion
