@@ -6,10 +6,12 @@ pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
 pub enum AuthError {
     #[error("invalid credentials")]
     InvalidCredentials,
-    #[error("email not verified")]
+    #[error("email address not verified")]
     EmailNotVerified,
-    #[error("email already exists")]
+    #[error("email address already exists")]
     EmailAlreadyExists,
+    #[error("email address not found")]
+    EmailNotFound,
     #[error("email already verified")]
     EmailAlreadyVerified,
     #[error("user not found")]
