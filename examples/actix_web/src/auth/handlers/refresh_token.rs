@@ -1,5 +1,4 @@
-use crate::AppState;
-use crate::models::RefreshRequest;
+use crate::{auth::models::RefreshRequest, infrastructure::state::AppState};
 use actix_web::{HttpResponse, Responder, post, web};
 use serde_json::json;
 
@@ -10,8 +9,8 @@ pub async fn refresh(
 ) -> impl Responder {
     match state.auth.refresh_token(&body.refresh_token).await {
         Ok(tokens) => HttpResponse::Ok().json(json!({
-            "access": tokens.access_token,
-            "refresh": tokens.refresh_token
+            "access_token": tokens.access_token,
+            "refresh_token": tokens.refresh_token
         })),
         Err(e) => HttpResponse::Unauthorized().json(json!({
             "error": format!("{:?}", e)

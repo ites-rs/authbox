@@ -1,7 +1,7 @@
-use crate::AppState;
+use crate::infrastructure::state::AppState;
 use actix_web::{HttpRequest, HttpResponse, Responder, get, web};
+use authbox::prelude::Claims;
 
-// pulls the token out of an "Authorization: Bearer <token>" header
 fn bearer_token(req: &HttpRequest) -> Option<&str> {
     req.headers()
         .get("Authorization")?
@@ -10,8 +10,14 @@ fn bearer_token(req: &HttpRequest) -> Option<&str> {
         .strip_prefix("Bearer ")
 }
 
+// Claims are already validated by auth_middleware, but auth.me() re-validates
+// internally so the response always reflects the latest blacklist state.
 #[get("/me")]
-pub async fn me(state: web::Data<AppState>, req: HttpRequest) -> impl Responder {
+pub async fn me(
+    state: web::Data<AppState>,
+    req: HttpRequest,
+    _claims: web::ReqData<Claims>,
+) -> impl Responder {
     let Some(token) = bearer_token(&req) else {
         return HttpResponse::Unauthorized().finish();
     };

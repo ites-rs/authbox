@@ -1,5 +1,4 @@
-use crate::AppState;
-use crate::common::*;
+use crate::{auth::common::RegisterDto, infrastructure::state::AppState};
 use actix_web::{HttpResponse, Responder, post, web};
 use authbox::prelude::AuthError;
 use serde_json::json;

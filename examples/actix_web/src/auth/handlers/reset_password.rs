@@ -1,17 +1,16 @@
-use crate::AppState;
-use crate::models::ForgotPasswordRequest;
+use crate::{auth::models::ResetPasswordRequest, infrastructure::state::AppState};
 use actix_web::{HttpResponse, Responder, post, web};
 use serde_json::json;
 
-#[post("/forgot-password")]
-pub async fn forgot_password(
+#[post("/reset-password")]
+pub async fn reset_password(
     state: web::Data<AppState>,
-    body: web::Json<ForgotPasswordRequest>,
+    body: web::Json<ResetPasswordRequest>,
 ) -> impl Responder {
-    match state.auth.request_password_reset(&body.email).await {
+    match state.auth.reset_password(&body.token, &body.password).await {
         Ok(_) => HttpResponse::Ok().json(json!({
             "success": true,
-            "message": "Password reset requested"
+            "message": "Password updated. Please log in again."
         })),
         Err(e) => HttpResponse::BadRequest().json(json!({
             "success": false,

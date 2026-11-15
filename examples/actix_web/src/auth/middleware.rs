@@ -1,3 +1,4 @@
+use crate::infrastructure::state::AppState;
 use actix_web::{
     Error, HttpMessage, HttpResponse,
     body::{BoxBody, MessageBody},
@@ -7,8 +8,9 @@ use actix_web::{
 };
 use serde_json::json;
 
-use crate::AppState;
-
+/// Validates the Bearer token on every request that hits a protected route.
+/// On success it injects the Claims into request extensions so handlers can
+/// grab them with `web::ReqData<Claims>` without touching the token again.
 pub async fn auth_middleware<B>(
     req: ServiceRequest,
     next: Next<B>,
@@ -27,7 +29,7 @@ where
         .and_then(|h| h.to_str().ok())
         .and_then(|s| s.strip_prefix("Bearer "))
     {
-        Some(token) => token.to_owned(),
+        Some(t) => t.to_owned(),
         None => {
             return Ok(req.into_response(HttpResponse::Unauthorized().json(json!({
                 "success": false,
@@ -37,18 +39,16 @@ where
     };
 
     let claims = match state.auth.is_token_valid(&token).await {
-        Ok(claims) => claims,
+        Ok(c) => c,
         Err(_) => {
             return Ok(req.into_response(HttpResponse::Unauthorized().json(json!({
                 "success": false,
-                "message": "Invalid token"
+                "message": "Invalid or expired token"
             }))));
         }
     };
 
-    // handlers can read these with web::ReqData<Claims> if they need them
     req.extensions_mut().insert(claims);
-
     let res = next.call(req).await?;
     Ok(res.map_into_boxed_body())
 }

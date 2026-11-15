@@ -1,5 +1,4 @@
-use crate::AppState;
-use crate::models::LogOutRequest;
+use crate::{auth::models::LogOutRequest, infrastructure::state::AppState};
 use actix_web::{HttpResponse, Responder, post, web};
 use authbox::prelude::Claims;
 use serde_json::json;
@@ -18,6 +17,7 @@ pub async fn logout(state: web::Data<AppState>, body: web::Json<LogOutRequest>) 
     }
 }
 
+// protected — requires a valid access token via auth_middleware
 #[post("/logout/all")]
 pub async fn logout_all(
     state: web::Data<AppState>,
@@ -26,9 +26,9 @@ pub async fn logout_all(
     match state.auth.logout_all(&claims.sub).await {
         Ok(_) => HttpResponse::Ok().json(json!({
             "success": true,
-            "message": "Logged out all sessions successfully"
+            "message": "All sessions revoked"
         })),
-        Err(e) => HttpResponse::Unauthorized().json(json!({
+        Err(e) => HttpResponse::InternalServerError().json(json!({
             "success": false,
             "error": format!("{:?}", e)
         })),

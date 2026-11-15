@@ -1,5 +1,4 @@
-use crate::AppState;
-use crate::models::VerifyEmailRequest;
+use crate::{auth::models::VerifyEmailRequest, infrastructure::state::AppState};
 use actix_web::{HttpResponse, Responder, post, web};
 use serde_json::json;
 

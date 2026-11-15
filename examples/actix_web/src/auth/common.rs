@@ -1,27 +1,30 @@
-//! test fixtures for the authbox integration tests: an in-memory user store,
-//! a registration dto with extra profile fields, mock email templates, and a
-//! helper that wires it all into an `AuthService` backed by redis.
-//!
-//! tests only. the redis helper expects a server on 127.0.0.1.
+// Everything needed to wire up and test the auth service:
+// the in-memory store, registration DTO, mock email templates,
+// all three email provider builders, and build_test_auth.
 #![allow(unused)]
 
-use crate::email_providers::resend_email_provider;
 use async_trait::async_trait;
 use authbox::prelude::*;
 use serde::{Deserialize, Serialize};
-use std::any::Any;
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::{
+    any::Any,
+    collections::HashMap,
+    env,
+    sync::{Arc, Mutex},
+};
 use uuid::Uuid;
 
-/// registration payload. the service only sees email and password through
-/// `RegisterUserInput`; the rest is read back in `TestStore::create_user`
-/// by downcasting with `as_any`.
+// ---------------------------------------------------------------------------
+// Registration DTO
+// ---------------------------------------------------------------------------
+
+/// The JSON body for POST /register. The service only reads email and
+/// password through `RegisterUserInput`; the extra fields are pulled back
+/// in `TestStore::create_user` by downcasting with `as_any`.
 #[derive(Clone, Debug, Deserialize)]
 pub struct RegisterDto {
     pub email: String,
     pub password: String,
-
     pub username: Option<String>,
     pub phone: Option<String>,
     pub country: Option<String>,
@@ -33,26 +36,25 @@ impl RegisterUserInput for RegisterDto {
     fn email(&self) -> &str {
         &self.email
     }
-
     fn password(&self) -> &str {
         &self.password
     }
-
     fn as_any(&self) -> &dyn Any {
         self
     }
 }
 
-/// the user we keep in `TestStore`. the password hash is never serialized.
+// ---------------------------------------------------------------------------
+// In-memory user
+// ---------------------------------------------------------------------------
+
 #[derive(Clone, Debug, Serialize)]
 pub struct TestUser {
     pub id: String,
     pub email: String,
     #[serde(skip_serializing)]
     pub password_hash: String,
-
     pub is_email_verified: bool,
-
     pub username: Option<String>,
     pub phone: Option<String>,
     pub country: Option<String>,
@@ -64,28 +66,21 @@ impl AuthUser for TestUser {
     fn id(&self) -> String {
         self.id.clone()
     }
-
     fn email(&self) -> &str {
         &self.email
     }
-
     fn password_hash(&self) -> &str {
         &self.password_hash
     }
-
     fn is_email_verified(&self) -> bool {
         self.is_email_verified
     }
-
-    fn set_email_verified(&mut self, verified: bool) {
-        self.is_email_verified = verified;
+    fn set_email_verified(&mut self, v: bool) {
+        self.is_email_verified = v;
     }
-
-    fn set_password_hash(&mut self, hash: String) {
-        self.password_hash = hash;
+    fn set_password_hash(&mut self, h: String) {
+        self.password_hash = h;
     }
-
-    // whole user as json, minus the hash (serde skips it)
     fn extra(&self) -> Option<serde_json::Value> {
         serde_json::to_value(self).ok()
     }
@@ -95,8 +90,12 @@ fn boxed(u: TestUser) -> Box<dyn AuthUser> {
     Box::new(u)
 }
 
-/// in-memory `UserStore`. clones share the same map, so a test can hand one
-/// copy to the builder and keep another to look at afterwards.
+// ---------------------------------------------------------------------------
+// In-memory store
+// ---------------------------------------------------------------------------
+
+/// Clones share the same underlying map, so a test can pass one copy to the
+/// builder and keep another to inspect results.
 #[derive(Clone, Default)]
 pub struct TestStore {
     pub users: Arc<Mutex<HashMap<String, TestUser>>>,
@@ -110,22 +109,21 @@ impl TestStore {
 
 #[async_trait]
 impl UserStore for TestStore {
-    async fn find_by_id(&self, user_id: &str) -> Result<Option<Box<dyn AuthUser>>, BoxError> {
-        Ok(self.users.lock().unwrap().get(user_id).cloned().map(boxed))
+    async fn find_by_id(&self, id: &str) -> Result<Option<Box<dyn AuthUser>>, BoxError> {
+        Ok(self.users.lock().unwrap().get(id).cloned().map(boxed))
     }
 
     async fn find_by_email(&self, email: &str) -> Result<Option<Box<dyn AuthUser>>, BoxError> {
-        let users = self.users.lock().unwrap();
-        Ok(users
+        Ok(self
+            .users
+            .lock()
+            .unwrap()
             .values()
             .find(|u| u.email == email)
             .cloned()
             .map(boxed))
     }
 
-    // the service only normalizes emails for lookups, so the store saves the
-    // normalized one itself. duplicate check and insert share one lock, like
-    // a UNIQUE index would. errors with "unique violation" on a repeat email.
     async fn create_user(
         &self,
         input: &dyn RegisterUserInput,
@@ -144,7 +142,6 @@ impl UserStore for TestStore {
             email,
             password_hash: pass_hash,
             is_email_verified: false,
-
             username: dto.and_then(|d| d.username.clone()),
             phone: dto.and_then(|d| d.phone.clone()),
             country: dto.and_then(|d| d.country.clone()),
@@ -156,86 +153,103 @@ impl UserStore for TestStore {
         Ok(boxed(user))
     }
 
-    // the service gives us a Box<dyn AuthUser>, which only has the core
-    // fields, so we merge those into the stored user instead of replacing it.
-    // that way username, phone etc. survive. errors if the id doesn't exist.
+    // merges core fields back into the stored record so the extra profile
+    // fields (username, phone, etc.) survive an update
     async fn update_user(&self, user: Box<dyn AuthUser>) -> Result<Box<dyn AuthUser>, BoxError> {
         let mut users = self.users.lock().unwrap();
         let existing = users.get_mut(&user.id()).ok_or("user not found")?;
-
         existing.email = user.email().to_owned();
         existing.password_hash = user.password_hash().to_owned();
         existing.is_email_verified = user.is_email_verified();
-
         Ok(boxed(existing.clone()))
     }
 
-    async fn delete_user(&self, user_id: &str) -> Result<(), BoxError> {
-        self.users.lock().unwrap().remove(user_id);
+    async fn delete_user(&self, id: &str) -> Result<(), BoxError> {
+        self.users.lock().unwrap().remove(id);
         Ok(())
     }
 
-    async fn check_email_verified(&self, user_id: &str) -> Result<bool, BoxError> {
-        match self.users.lock().unwrap().get(user_id) {
-            Some(user) => Ok(user.is_email_verified),
-            None => Err("user not found".into()),
-        }
+    async fn check_email_verified(&self, id: &str) -> Result<bool, BoxError> {
+        self.users
+            .lock()
+            .unwrap()
+            .get(id)
+            .map(|u| u.is_email_verified)
+            .ok_or_else(|| "user not found".into())
     }
 }
 
-/// email templates that link to the local dev server on port 8080.
+// ---------------------------------------------------------------------------
+// Mock email templates
+// ---------------------------------------------------------------------------
+
 #[derive(Clone)]
 pub struct MockTemplates;
 
 impl EmailTemplateConfig for MockTemplates {
     fn verify_email_subject(&self, _user: &dyn AuthUser) -> String {
-        "Verify your email".to_string()
+        "Verify your email".into()
     }
 
     fn verify_email_body(&self, user: &dyn AuthUser, token: &str) -> String {
-        println!("TOKEN, {token}");
+        println!("[verify token] {token}");
         format!(
-            "Hello {},
-
-Please verify your email by clicking the link below:
-
-http://localhost:8080/verify-email/{}
-
-If you did not create this account, you can ignore this email.",
+            "Hi {},\n\nVerify here: http://localhost:8080/verify-email/{}\n\nIgnore if you didn't sign up.",
             user.email(),
             token
         )
     }
 
     fn reset_password_subject(&self, _user: &dyn AuthUser) -> String {
-        "Reset your password".to_string()
+        "Reset your password".into()
     }
 
     fn reset_password_body(&self, user: &dyn AuthUser, token: &str) -> String {
-        println!("RESEt, TOKEN, {token}");
+        println!("[reset token] {token}");
         format!(
-            "Hello {},
-
-You requested a password reset.
-
-Reset your password using the link below:
-
-http://localhost:8080/reset-password/{}
-
-If you did not request this, ignore this email.",
+            "Hi {},\n\nReset here: http://localhost:8080/reset-password/{}\n\nIgnore if you didn't request this.",
             user.email(),
             token
         )
     }
 }
 
-/// builds an `AuthService` for tests: in-memory store, redis for the
-/// blacklist and one-time tokens, sendgrid for email, and a memory user cache.
-/// needs redis running on 127.0.0.1. the "secret" jwt key is for tests only.
+// ---------------------------------------------------------------------------
+// Email providers
+// ---------------------------------------------------------------------------
+
+pub fn resend_email_provider() -> ResendEmailProvider {
+    ResendEmailProvider::new(
+        env::var("RESEND_API_KEY").expect("RESEND_API_KEY missing"),
+        env::var("RESEND_FROM_EMAIL").expect("RESEND_FROM_EMAIL missing"),
+    )
+}
+
+pub fn sendgrid_email_provider() -> SendGridEmailProvider {
+    SendGridEmailProvider::new(
+        env::var("SENDGRID_API_KEY").expect("SENDGRID_API_KEY missing"),
+        env::var("SENDGRID_FROM_EMAIL").expect("SENDGRID_FROM_EMAIL missing"),
+        env::var("SENDGRID_FROM_NAME").expect("SENDGRID_FROM_NAME missing"),
+    )
+}
+
+pub fn smtp_email_provider() -> SmtpEmailProvider {
+    SmtpEmailProvider::new(
+        &env::var("SMTP_HOST").expect("SMTP_HOST missing"),
+        &env::var("SMTP_USERNAME").expect("SMTP_USERNAME missing"),
+        &env::var("SMTP_PASSWORD").expect("SMTP_PASSWORD missing"),
+        &env::var("SMTP_FROM_EMAIL").expect("SMTP_FROM_EMAIL missing"),
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Auth service builder
+// ---------------------------------------------------------------------------
+
 pub async fn build_test_auth() -> Result<AuthService, Box<dyn std::error::Error + Send + Sync>> {
     let client = redis::Client::open("redis://127.0.0.1/")?;
 
-    let auth = AuthService::builder()
+    Ok(AuthService::builder()
         .store(TestStore::new())
         .hasher(DefaultHasher)
         .tokens(DefaultJwtManager::new(
@@ -248,7 +262,5 @@ pub async fn build_test_auth() -> Result<AuthService, Box<dyn std::error::Error 
         .email_templates(MockTemplates)
         .ott_store(RedisOttStore::new(client))
         .user_cache(DefaultMemoryUserCache::default())
-        .build()?;
-
-    Ok(auth)
+        .build()?)
 }
